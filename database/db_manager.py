@@ -7,7 +7,11 @@ from .models import (
     Building, Component, MortiseTenon, MeasurementRecord,
     RecheckTask, ImportBatch, ImportError,
     RECHECK_STATUS_PENDING, RECHECK_STATUS_IN_PROGRESS,
-    RECHECK_STATUS_COMPLETED, RECHECK_STATUS_CANCELLED
+    RECHECK_STATUS_COMPLETED, RECHECK_STATUS_CANCELLED,
+    DiseaseRecord, DiseaseTreatment, DiseaseStats,
+    DISEASE_STATUS_PENDING, DISEASE_STATUS_IN_PROGRESS,
+    DISEASE_STATUS_COMPLETED, DISEASE_STATUS_REVIEWED,
+    DISEASE_TYPES, DISEASE_SEVERITIES, PRIORITIES,
 )
 
 
@@ -148,6 +152,51 @@ class DatabaseManager:
         ''')
 
         cursor.execute('''
+        CREATE TABLE IF NOT EXISTS disease_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            building_id INTEGER NOT NULL,
+            component_id INTEGER NOT NULL,
+            component_code TEXT NOT NULL,
+            disease_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            description TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            size_length REAL DEFAULT 0,
+            size_width REAL DEFAULT 0,
+            size_depth REAL DEFAULT 0,
+            photo_paths TEXT DEFAULT '',
+            repair_suggestion TEXT DEFAULT '',
+            repair_method TEXT DEFAULT '',
+            estimated_cost REAL DEFAULT 0,
+            handler TEXT DEFAULT '',
+            plan_date TEXT DEFAULT '',
+            complete_date TEXT DEFAULT '',
+            remark TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE CASCADE,
+            FOREIGN KEY (component_id) REFERENCES components(id) ON DELETE CASCADE
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS disease_treatments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            disease_id INTEGER NOT NULL,
+            treatment_type TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            handler TEXT DEFAULT '',
+            treatment_date TEXT DEFAULT '',
+            photo_paths TEXT DEFAULT '',
+            remark TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (disease_id) REFERENCES disease_records(id) ON DELETE CASCADE
+        )
+        ''')
+
+        cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_measurement_component_idx ON measurement_records(component_id)
         ''')
         cursor.execute('''
@@ -170,6 +219,24 @@ class DatabaseManager:
         ''')
         cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_recheck_component_idx ON recheck_tasks(component_id)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_building_idx ON disease_records(building_id)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_component_idx ON disease_records(component_id)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_status_idx ON disease_records(status)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_type_idx ON disease_records(disease_type)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_severity_idx ON disease_records(severity)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_treatment_disease_idx ON disease_treatments(disease_id)
         ''')
 
         self.conn.commit()
@@ -629,3 +696,176 @@ class DatabaseManager:
             LIMIT 1
         """, (component_id,))
         return cursor.fetchone() is not None
+
+    def add_disease_record(self, disease: DiseaseRecord) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO disease_records
+               (building_id, component_id, component_code, disease_type, severity,
+                priority, status, description, location, size_length, size_width,
+                size_depth, photo_paths, repair_suggestion, repair_method,
+                estimated_cost, handler, plan_date, complete_date, remark,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (disease.building_id, disease.component_id, disease.component_code,
+             disease.disease_type, disease.severity, disease.priority, disease.status,
+             disease.description, disease.location, disease.size_length, disease.size_width,
+             disease.size_depth, disease.photo_paths, disease.repair_suggestion,
+             disease.repair_method, disease.estimated_cost, disease.handler,
+             disease.plan_date, disease.complete_date, disease.remark,
+             disease.created_at, disease.updated_at)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def update_disease_record(self, disease: DiseaseRecord) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """UPDATE disease_records SET 
+               disease_type=?, severity=?, priority=?, status=?, description=?,
+               location=?, size_length=?, size_width=?, size_depth=?,
+               photo_paths=?, repair_suggestion=?, repair_method=?,
+               estimated_cost=?, handler=?, plan_date=?, complete_date=?,
+               remark=?, updated_at=?
+               WHERE id=?""",
+            (disease.disease_type, disease.severity, disease.priority, disease.status,
+             disease.description, disease.location, disease.size_length, disease.size_width,
+             disease.size_depth, disease.photo_paths, disease.repair_suggestion,
+             disease.repair_method, disease.estimated_cost, disease.handler,
+             disease.plan_date, disease.complete_date, disease.remark,
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), disease.id)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_disease_record(self, disease_id: int) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM disease_records WHERE id=?", (disease_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_disease_record(self, disease_id: int) -> Optional[DiseaseRecord]:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM disease_records WHERE id=?", (disease_id,))
+        row = cursor.fetchone()
+        if row:
+            return DiseaseRecord(**dict(row))
+        return None
+
+    def get_diseases_by_building(self, building_id: int,
+                                 status: str = None,
+                                 disease_type: str = None,
+                                 severity: str = None) -> List[DiseaseRecord]:
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM disease_records WHERE building_id=?"
+        params = [building_id]
+        if status:
+            query += " AND status=?"
+            params.append(status)
+        if disease_type:
+            query += " AND disease_type=?"
+            params.append(disease_type)
+        if severity:
+            query += " AND severity=?"
+            params.append(severity)
+        query += " ORDER BY created_at DESC"
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [DiseaseRecord(**dict(row)) for row in rows]
+
+    def get_diseases_by_component(self, component_id: int) -> List[DiseaseRecord]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM disease_records WHERE component_id=? ORDER BY created_at DESC",
+            (component_id,)
+        )
+        rows = cursor.fetchall()
+        return [DiseaseRecord(**dict(row)) for row in rows]
+
+    def get_disease_statistics(self, building_id: int) -> DiseaseStats:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT status, COUNT(*) as cnt FROM disease_records
+            WHERE building_id=? GROUP BY status
+        """, (building_id,))
+        status_rows = cursor.fetchall()
+        status_counts = {"pending": 0, "in_progress": 0, "completed": 0, "reviewed": 0}
+        total = 0
+        for row in status_rows:
+            status_counts[row["status"]] = row["cnt"]
+            total += row["cnt"]
+
+        cursor.execute("""
+            SELECT disease_type, COUNT(*) as cnt FROM disease_records
+            WHERE building_id=? GROUP BY disease_type
+        """, (building_id,))
+        type_rows = cursor.fetchall()
+        by_type = {}
+        for row in type_rows:
+            by_type[row["disease_type"]] = row["cnt"]
+
+        cursor.execute("""
+            SELECT severity, COUNT(*) as cnt FROM disease_records
+            WHERE building_id=? GROUP BY severity
+        """, (building_id,))
+        severity_rows = cursor.fetchall()
+        by_severity = {}
+        for row in severity_rows:
+            by_severity[row["severity"]] = row["cnt"]
+
+        cursor.execute("""
+            SELECT priority, COUNT(*) as cnt FROM disease_records
+            WHERE building_id=? GROUP BY priority
+        """, (building_id,))
+        priority_rows = cursor.fetchall()
+        by_priority = {}
+        for row in priority_rows:
+            by_priority[row["priority"]] = row["cnt"]
+
+        cursor.execute("""
+            SELECT COALESCE(SUM(estimated_cost), 0) as total_cost
+            FROM disease_records WHERE building_id=?
+        """, (building_id,))
+        cost_row = cursor.fetchone()
+        total_cost = cost_row["total_cost"] if cost_row else 0.0
+
+        return DiseaseStats(
+            total_count=total,
+            pending_count=status_counts["pending"],
+            in_progress_count=status_counts["in_progress"],
+            completed_count=status_counts["completed"],
+            reviewed_count=status_counts["reviewed"],
+            by_type=by_type,
+            by_severity=by_severity,
+            by_priority=by_priority,
+            total_estimated_cost=total_cost
+        )
+
+    def add_disease_treatment(self, treatment: DiseaseTreatment) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO disease_treatments
+               (disease_id, treatment_type, description, handler,
+                treatment_date, photo_paths, remark, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (treatment.disease_id, treatment.treatment_type, treatment.description,
+             treatment.handler, treatment.treatment_date, treatment.photo_paths,
+             treatment.remark, treatment.created_at)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def delete_disease_treatment(self, treatment_id: int) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM disease_treatments WHERE id=?", (treatment_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_treatments_by_disease(self, disease_id: int) -> List[DiseaseTreatment]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM disease_treatments WHERE disease_id=? ORDER BY created_at DESC",
+            (disease_id,)
+        )
+        rows = cursor.fetchall()
+        return [DiseaseTreatment(**dict(row)) for row in rows]

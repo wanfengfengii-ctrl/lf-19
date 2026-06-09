@@ -1,6 +1,7 @@
 import sys
 import os
 from datetime import datetime
+from typing import Optional
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
@@ -18,9 +19,10 @@ from database import (
     RECHECK_STATUS_PENDING, RECHECK_STATUS_IN_PROGRESS,
     RECHECK_STATUS_COMPLETED, RECHECK_STATUS_CANCELLED
 )
-from services import CsvImporter, DeviationCalculator, ReportGenerator, RecheckService
+from services import CsvImporter, DeviationCalculator, ReportGenerator, RecheckService, DiseaseService
 from services.deviation_calculator import ComponentDeviation, FilterStatus, DashboardStats
 from .chart_widget import SectionChart, DeviationDistributionChart, DeviationStatsChart
+from .disease_widget import DiseaseManagementWidget, DiseaseDashboardWidget
 
 
 class BuildingDialog(QDialog):
@@ -187,6 +189,7 @@ class MainWindow(QMainWindow):
         self.deviation_calc = DeviationCalculator(self.db)
         self.report_gen = ReportGenerator(self.db)
         self.recheck_service = RecheckService(self.db)
+        self.disease_service = DiseaseService(self.db)
 
         self.current_building_id = None
         self.current_component_id = None
@@ -233,6 +236,8 @@ class MainWindow(QMainWindow):
         self._init_import_tab()
         self._init_analysis_tab()
         self._init_recheck_tab()
+        self._init_disease_tab()
+        self._init_disease_dashboard_tab()
         self._init_history_tab()
         self._init_report_tab()
 
@@ -650,6 +655,24 @@ class MainWindow(QMainWindow):
 
         self.tabs.addTab(tab, "🔄 复测任务")
 
+    def _init_disease_dashboard_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        self.disease_dashboard = DiseaseDashboardWidget(self.db)
+        layout.addWidget(self.disease_dashboard)
+
+        self.tabs.addTab(tab, "🏥 病害看板")
+
+    def _init_disease_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        self.disease_widget = DiseaseManagementWidget(self.db)
+        layout.addWidget(self.disease_widget)
+
+        self.tabs.addTab(tab, "📋 病害档案")
+
     def _init_history_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -759,6 +782,7 @@ class MainWindow(QMainWindow):
         self._refresh_type_filter()
         self._refresh_dashboard()
         self._refresh_recheck_table()
+        self._refresh_disease_data()
         self._refresh_import_batches()
 
     def _clear_all_data(self):
@@ -788,6 +812,18 @@ class MainWindow(QMainWindow):
         self.dash_abnormal_table.setRowCount(0)
         self.dash_type_table.setRowCount(0)
         self.filter_count_label.setText("共 0 个构件")
+        if hasattr(self, 'disease_widget') and self.disease_widget:
+            self.disease_widget.set_building(None)
+        if hasattr(self, 'disease_dashboard') and self.disease_dashboard:
+            self.disease_dashboard.set_building(None)
+
+    def _refresh_disease_data(self):
+        if not self.current_building_id:
+            return
+        if hasattr(self, 'disease_widget') and self.disease_widget:
+            self.disease_widget.set_building(self.current_building_id)
+        if hasattr(self, 'disease_dashboard') and self.disease_dashboard:
+            self.disease_dashboard.set_building(self.current_building_id)
 
     def _add_building(self):
         dlg = BuildingDialog(self)
