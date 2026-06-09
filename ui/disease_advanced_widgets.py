@@ -179,9 +179,11 @@ class WorkflowStepWidget(QWidget):
         return step
 
     def _init_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout = self.layout()
+        if layout is None:
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
 
         status_map = {code: name for code, name in DISEASE_STATUSES}
 
@@ -362,7 +364,7 @@ class DiseasePhotoCompareWidget(QWidget):
             scaled = pixmap.scaled(150, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             item.setIcon(QIcon(scaled))
         item.setText(os.path.basename(photo.photo_path))
-        item.setToolTip(f"{photo.photo_path}\n{photo.stage or ''}")
+        item.setToolTip(f"{photo.photo_path}\n{photo.photo_stage or ''}")
         list_widget.addItem(item)
 
     def clear(self):

@@ -983,20 +983,22 @@ class DatabaseManager:
 
         return DiseaseStats(
             total_count=total,
-            pending_count=status_counts["pending"],
-            in_progress_count=status_counts["in_progress"],
-            completed_count=status_counts["completed"],
-            reviewed_count=status_counts["reviewed"],
-            discovered_count=status_counts["discovered"],
-            assigned_count=status_counts["assigned"],
-            accepted_count=status_counts["accepted"],
-            archived_count=status_counts["archived"],
-            rejected_count=status_counts["rejected"],
+            pending_count=status_counts.get("pending", 0),
+            in_progress_count=status_counts.get("in_progress", 0),
+            completed_count=status_counts.get("completed", 0),
+            reviewed_count=status_counts.get("reviewed", 0),
             by_type=by_type,
             by_severity=by_severity,
             by_priority=by_priority,
-            total_estimated_cost=total_cost
+            total_estimated_cost=total_cost,
+            discovered_count=status_counts.get("discovered", 0),
+            assigned_count=status_counts.get("assigned", 0),
+            accepted_count=status_counts.get("accepted", 0),
+            archived_count=status_counts.get("archived", 0),
+            rejected_count=status_counts.get("rejected", 0),
+            by_status=status_counts.copy()
         )
+
 
     def add_disease_treatment(self, treatment: DiseaseTreatment) -> int:
         cursor = self.conn.cursor()
@@ -1180,16 +1182,14 @@ class DatabaseManager:
         self.conn.commit()
         return cursor.rowcount > 0
 
-    def get_warning(self, warning_id: int) -> Optional[WarningRecord]:
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM warning_records WHERE id=?", (warning_id,))
-        row = cursor.fetchone()
-        if row:
-            d = dict(row)
-            d['is_read'] = bool(d['is_read'])
-            d['is_handled'] = bool(d['is_handled'])
-            return WarningRecord(**d)
-        return None
+    def get_warning_records(self, building_id: int, warning_type: str = None,
+                            warning_level: str = None, is_read: bool = None) -> List[WarningRecord]:
+        return self.get_warnings_by_building(
+            building_id=building_id,
+            is_read=is_read,
+            warning_type=warning_type,
+            warning_level=warning_level,
+        )
 
     def get_warnings_by_building(self, building_id: int, is_read: bool = None,
                                   warning_type: str = None,
@@ -1276,6 +1276,7 @@ class DatabaseManager:
 
     def get_operation_logs(self, module: str = None, action: str = None,
                            target_type: str = None, target_id: int = None,
+                           building_id: int = None, action_type: str = None,
                            limit: int = 100, offset: int = 0) -> List[OperationLog]:
         cursor = self.conn.cursor()
         query = "SELECT * FROM operation_logs WHERE 1=1"
@@ -1283,6 +1284,7 @@ class DatabaseManager:
         if module:
             query += " AND module=?"
             params.append(module)
+        action = action or action_type
         if action:
             query += " AND action=?"
             params.append(action)
@@ -1292,6 +1294,9 @@ class DatabaseManager:
         if target_id is not None:
             query += " AND target_id=?"
             params.append(target_id)
+        if building_id is not None:
+            query += " AND detail LIKE ?"
+            params.append(f"%建筑ID:{building_id}%")
         query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         cursor.execute(query, params)
@@ -1343,16 +1348,19 @@ class DatabaseManager:
             self.conn.commit()
             return cursor.lastrowid
 
-    def get_deviation_disease_link(self, component_id: int) -> Optional[DeviationDiseaseLink]:
+    def get_deviation_disease_links(self, building_id: int) -> List[DeviationDiseaseLink]:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT * FROM deviation_disease_links WHERE component_id=?",
-            (component_id,)
+            """
+            SELECT ddl.* FROM deviation_disease_links ddl
+            JOIN components c ON ddl.component_id = c.id
+            WHERE c.building_id=?
+            ORDER BY ddl.risk_level DESC, ddl.disease_count DESC, ddl.created_at DESC
+            """,
+            (building_id,)
         )
-        row = cursor.fetchone()
-        if row:
-            return DeviationDiseaseLink(**dict(row))
-        return None
+        rows = cursor.fetchall()
+        return [DeviationDiseaseLink(**dict(row)) for row in rows]
 
     def get_high_risk_components(self, building_id: int,
                                   min_risk_level: str = "high") -> List[DeviationDiseaseLink]:

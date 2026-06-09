@@ -280,6 +280,7 @@ class DiseaseStats:
     accepted_count: int = 0
     archived_count: int = 0
     rejected_count: int = 0
+    by_status: Dict[str, int] = None
 
     def __post_init__(self):
         if self.by_type is None:
@@ -288,6 +289,8 @@ class DiseaseStats:
             self.by_severity = {}
         if self.by_priority is None:
             self.by_priority = {}
+        if self.by_status is None:
+            self.by_status = {}
 
 
 @dataclass
