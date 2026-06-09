@@ -411,6 +411,15 @@ class DatabaseManager:
         self.conn.commit()
         return cursor.rowcount > 0
 
+    def clear_recheck_mark(self, record_id: int) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE measurement_records SET is_recheck=0 WHERE id=?",
+            (record_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     def get_recheck_records(self, building_id: int) -> List[MeasurementRecord]:
         cursor = self.conn.cursor()
         cursor.execute("""

@@ -136,13 +136,15 @@ class DeviationCalculator:
         results = []
 
         for dev in all_devs:
-            if status_filter == FilterStatus.NORMAL and dev.is_abnormal:
+            has_data = dev.latest_record is not None
+
+            if status_filter == FilterStatus.NORMAL and (dev.is_abnormal or not has_data):
                 continue
-            if status_filter == FilterStatus.ABNORMAL and not dev.is_abnormal:
+            if status_filter == FilterStatus.ABNORMAL and (not dev.is_abnormal or not has_data):
                 continue
-            if status_filter == FilterStatus.RECHECK_NEEDED and not dev.recheck_needed:
+            if status_filter == FilterStatus.RECHECK_NEEDED and (not dev.recheck_needed or not has_data):
                 continue
-            if status_filter == FilterStatus.NO_DATA and dev.latest_record is not None:
+            if status_filter == FilterStatus.NO_DATA and has_data:
                 continue
 
             if component_type and dev.component.component_type != component_type:

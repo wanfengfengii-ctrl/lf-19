@@ -53,7 +53,7 @@ class RecheckService:
         if not task or task.status not in [RECHECK_STATUS_PENDING, RECHECK_STATUS_IN_PROGRESS]:
             return False
 
-        self.db.mark_for_recheck(recheck_record_id, "复测完成")
+        self.db.clear_recheck_mark(recheck_record_id)
 
         return self.db.update_recheck_task(
             task_id,

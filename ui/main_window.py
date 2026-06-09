@@ -1590,7 +1590,7 @@ class MainWindow(QMainWindow):
                 angle=angle_spin.value(),
                 measure_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 version=latest_ver + 1,
-                is_recheck=True,
+                is_recheck=False,
                 remark="复测数据"
             )
             new_rec_id = self.db.add_measurement_record(new_rec)

@@ -37,6 +37,24 @@ class CsvImporter:
 
     def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
+        self.default_deviation_threshold = 5.0
+
+    def _create_auto_component(self, building_id: int, component_code: str,
+                               length: float, width: float, angle: float) -> Component:
+        component = Component(
+            id=None,
+            building_id=building_id,
+            code=component_code,
+            name=component_code,
+            component_type="未分类",
+            design_length=length,
+            design_width=width,
+            design_angle=angle,
+            deviation_threshold=self.default_deviation_threshold
+        )
+        cid = self.db.add_component(component)
+        component.id = cid
+        return component
 
     def _is_abnormal(self, component: Component, length: float, width: float, angle: float) -> bool:
         threshold = component.deviation_threshold
@@ -79,19 +97,18 @@ class CsvImporter:
                     component = self.db.get_component_by_code(building_id, cleaned["component_code"])
 
                     if component is None:
-                        result.errors.append(
-                            f"第{i}行：构件编号 {cleaned['component_code']} 不存在于当前建筑，已跳过")
-                        result.new_skipped.append(f"第{i}行：{cleaned['component_code']} 不存在")
-                        result.error_count += 1
-                        continue
-
-                    is_abnormal = self._is_abnormal(
-                        component, cleaned["length"], cleaned["width"], cleaned["angle"]
-                    )
-                    if is_abnormal:
                         result.warnings.append(
-                            f"第{i}行：构件 {cleaned['component_code']} 偏差超过阈值，导入后将自动标记需复测")
+                            f"第{i}行：构件编号 {cleaned['component_code']} 不存在，将自动创建新构件")
                         result.warning_count += 1
+                        result.new_components.append(cleaned["component_code"])
+                    else:
+                        is_abnormal = self._is_abnormal(
+                            component, cleaned["length"], cleaned["width"], cleaned["angle"]
+                        )
+                        if is_abnormal:
+                            result.warnings.append(
+                                f"第{i}行：构件 {cleaned['component_code']} 偏差超过阈值，导入后将自动标记需复测")
+                            result.warning_count += 1
 
                     result.success_count += 1
 
@@ -173,22 +190,11 @@ class CsvImporter:
                     component = self.db.get_component_by_code(building_id, cleaned["component_code"])
 
                     if component is None:
-                        err_msg = f"第{i}行：构件编号 {cleaned['component_code']} 不存在于当前建筑，已跳过"
-                        result.errors.append(err_msg)
-                        result.new_skipped.append(f"第{i}行：{cleaned['component_code']} 不存在")
-                        result.error_count += 1
-                        if batch_id:
-                            import_err = ImportError(
-                                id=None,
-                                batch_id=batch_id,
-                                row_number=i,
-                                component_code=cleaned["component_code"],
-                                error_type="component_not_found",
-                                error_message=err_msg,
-                                row_data=json.dumps(row, ensure_ascii=False)
-                            )
-                            self.db.add_import_error(import_err)
-                        continue
+                        component = self._create_auto_component(
+                            building_id, cleaned["component_code"],
+                            cleaned["length"], cleaned["width"], cleaned["angle"]
+                        )
+                        result.new_components.append(cleaned["component_code"])
 
                     latest_version = self.db.get_latest_version(component.id)
                     new_version = latest_version + 1
