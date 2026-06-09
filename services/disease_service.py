@@ -339,8 +339,10 @@ class DiseaseService:
         if remark:
             disease.remark = remark
 
-        if status == DISEASE_STATUS_COMPLETED and not disease.complete_date:
+        if status in (DISEASE_STATUS_COMPLETED, DISEASE_STATUS_REVIEWED) and not disease.complete_date:
             disease.complete_date = datetime.now().strftime("%Y-%m-%d")
+        elif status not in (DISEASE_STATUS_COMPLETED, DISEASE_STATUS_REVIEWED):
+            disease.complete_date = ""
 
         return self.db.update_disease_record(disease)
 

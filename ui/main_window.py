@@ -986,9 +986,10 @@ class MainWindow(QMainWindow):
                                      QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             if self.db.delete_component(self.current_component_id):
-                self._refresh_component_table()
-                self._refresh_deviation_analysis()
                 self.current_component_id = None
+                self._refresh_component_table()
+                self._refresh_history_table()
+                self._refresh_deviation_analysis()
                 self.statusBar().showMessage("构件已删除", 3000)
             else:
                 QMessageBox.critical(self, "错误", "删除失败")

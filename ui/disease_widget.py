@@ -190,8 +190,9 @@ class DiseaseDialog(QDialog):
 
         self.complete_date = QDateEdit()
         self.complete_date.setCalendarPopup(True)
-        self.complete_date.setDate(QDate.currentDate())
         self.complete_date.setSpecialValueText(" ")
+        self.complete_date.setMinimumDate(QDate(1900, 1, 1))
+        self.complete_date.setDate(QDate(1900, 1, 1))
         handler_form.addRow("完成日期", self.complete_date)
 
         self.remark_edit = QTextEdit()
@@ -264,6 +265,14 @@ class DiseaseDialog(QDialog):
             component_id = self.component_combo.currentData()
             component_code = self.component_combo.currentText().split(" - ")[0]
 
+        plan_date_str = self.plan_date.date().toString("yyyy-MM-dd")
+
+        status = self.status_combo.currentData()
+        complete_date_str = ""
+        if status in (DISEASE_STATUS_COMPLETED, DISEASE_STATUS_REVIEWED):
+            if self.complete_date.date() > QDate(1900, 1, 1):
+                complete_date_str = self.complete_date.date().toString("yyyy-MM-dd")
+
         disease = DiseaseRecord(
             id=self.disease.id if self.disease else None,
             building_id=self.disease.building_id if self.disease else self.building_id,
@@ -272,7 +281,7 @@ class DiseaseDialog(QDialog):
             disease_type=self.type_combo.currentData(),
             severity=self.severity_combo.currentData(),
             priority=self.priority_combo.currentData(),
-            status=self.status_combo.currentData(),
+            status=status,
             description=self.desc_edit.toPlainText().strip(),
             location=self.location_edit.text().strip(),
             size_length=self.length_spin.value(),
@@ -283,8 +292,8 @@ class DiseaseDialog(QDialog):
             repair_method=self.method_edit.text().strip(),
             estimated_cost=self.cost_spin.value(),
             handler=self.handler_edit.text().strip(),
-            plan_date=self.plan_date.date().toString("yyyy-MM-dd"),
-            complete_date=self.complete_date.date().toString("yyyy-MM-dd"),
+            plan_date=plan_date_str,
+            complete_date=complete_date_str,
             remark=self.remark_edit.toPlainText().strip(),
         )
         return disease
@@ -325,6 +334,8 @@ class DiseaseDialog(QDialog):
             self.plan_date.setDate(QDate.fromString(disease.plan_date, "yyyy-MM-dd"))
         if disease.complete_date:
             self.complete_date.setDate(QDate.fromString(disease.complete_date, "yyyy-MM-dd"))
+        else:
+            self.complete_date.setDate(QDate(1900, 1, 1))
 
         self.remark_edit.setPlainText(disease.remark)
 
