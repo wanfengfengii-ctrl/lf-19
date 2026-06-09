@@ -8,14 +8,18 @@ from PySide6.QtWidgets import (
     QHeaderView, QMessageBox, QInputDialog, QFileDialog, QComboBox,
     QSplitter, QGroupBox, QFormLayout, QTextEdit, QDoubleSpinBox,
     QListWidget, QListWidgetItem, QAbstractItemView, QDialog, QDialogButtonBox,
-    QCheckBox
+    QCheckBox, QFrame, QScrollArea, QGridLayout, QSpinBox, QPlainTextEdit
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QBrush, QColor
 
-from database import DatabaseManager, Building, Component, MortiseTenon, MeasurementRecord
-from services import CsvImporter, DeviationCalculator, ReportGenerator
-from services.deviation_calculator import ComponentDeviation
+from database import (
+    DatabaseManager, Building, Component, MortiseTenon, MeasurementRecord,
+    RECHECK_STATUS_PENDING, RECHECK_STATUS_IN_PROGRESS,
+    RECHECK_STATUS_COMPLETED, RECHECK_STATUS_CANCELLED
+)
+from services import CsvImporter, DeviationCalculator, ReportGenerator, RecheckService
+from services.deviation_calculator import ComponentDeviation, FilterStatus, DashboardStats
 from .chart_widget import SectionChart, DeviationDistributionChart, DeviationStatsChart
 
 
@@ -175,16 +179,19 @@ class ComponentDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("古建筑木构件测绘数据管理系统")
-        self.resize(1200, 800)
+        self.setWindowTitle("古建筑木构件测绘数据管理系统 v2.0")
+        self.resize(1400, 900)
 
         self.db = DatabaseManager()
         self.csv_importer = CsvImporter(self.db)
         self.deviation_calc = DeviationCalculator(self.db)
         self.report_gen = ReportGenerator(self.db)
+        self.recheck_service = RecheckService(self.db)
 
         self.current_building_id = None
         self.current_component_id = None
+        self._all_deviations = []
+        self._current_filter = FilterStatus.ALL
 
         self._init_ui()
         self._refresh_building_list()
@@ -220,13 +227,160 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs, 1)
 
+        self._init_dashboard_tab()
         self._init_component_tab()
         self._init_mortise_tab()
         self._init_import_tab()
         self._init_analysis_tab()
+        self._init_recheck_tab()
+        self._init_history_tab()
         self._init_report_tab()
 
         self.statusBar().showMessage("就绪")
+
+    def _init_dashboard_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        top_row = QHBoxLayout()
+        stats_group = QGroupBox("核心指标")
+        stats_layout = QGridLayout(stats_group)
+
+        self.dash_total_label = self._create_stat_card("构件总数", "-", "#3498db")
+        self.dash_normal_label = self._create_stat_card("合格构件", "-", "#2ecc71")
+        self.dash_abnormal_label = self._create_stat_card("异常构件", "-", "#e74c3c")
+        self.dash_passrate_label = self._create_stat_card("合格率", "-", "#9b59b6")
+
+        stats_layout.addWidget(self.dash_total_label, 0, 0)
+        stats_layout.addWidget(self.dash_normal_label, 0, 1)
+        stats_layout.addWidget(self.dash_abnormal_label, 0, 2)
+        stats_layout.addWidget(self.dash_passrate_label, 0, 3)
+
+        top_row.addWidget(stats_group, 1)
+        layout.addLayout(top_row)
+
+        middle_row = QHBoxLayout()
+
+        recheck_group = QGroupBox("复测任务概览")
+        recheck_layout = QGridLayout(recheck_group)
+        self.dash_recheck_pending = self._create_stat_card("待处理", "-", "#f39c12", small=True)
+        self.dash_recheck_inprogress = self._create_stat_card("进行中", "-", "#3498db", small=True)
+        self.dash_recheck_completed = self._create_stat_card("已完成", "-", "#2ecc71", small=True)
+        recheck_layout.addWidget(self.dash_recheck_pending, 0, 0)
+        recheck_layout.addWidget(self.dash_recheck_inprogress, 0, 1)
+        recheck_layout.addWidget(self.dash_recheck_completed, 0, 2)
+
+        dev_stats_group = QGroupBox("偏差统计")
+        dev_stats_layout = QVBoxLayout(dev_stats_group)
+        self.dash_dev_stats = QLabel("请选择建筑查看偏差统计")
+        self.dash_dev_stats.setWordWrap(True)
+        dev_stats_layout.addWidget(self.dash_dev_stats)
+
+        middle_row.addWidget(recheck_group, 1)
+        middle_row.addWidget(dev_stats_group, 1)
+        layout.addLayout(middle_row)
+
+        bottom_row = QHBoxLayout()
+
+        abnormal_group = QGroupBox("异常构件 TOP 10")
+        abnormal_layout = QVBoxLayout(abnormal_group)
+        self.dash_abnormal_table = QTableWidget()
+        self.dash_abnormal_table.setColumnCount(4)
+        self.dash_abnormal_table.setHorizontalHeaderLabels(
+            ["构件编号", "长度偏差", "宽度偏差", "角度偏差"]
+        )
+        self.dash_abnormal_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.dash_abnormal_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.dash_abnormal_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        abnormal_layout.addWidget(self.dash_abnormal_table)
+
+        type_group = QGroupBox("按类型异常分布")
+        type_layout = QVBoxLayout(type_group)
+        self.dash_type_table = QTableWidget()
+        self.dash_type_table.setColumnCount(2)
+        self.dash_type_table.setHorizontalHeaderLabels(["构件类型", "异常数量"])
+        self.dash_type_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.dash_type_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        type_layout.addWidget(self.dash_type_table)
+
+        bottom_row.addWidget(abnormal_group, 2)
+        bottom_row.addWidget(type_group, 1)
+        layout.addLayout(bottom_row, 1)
+
+        btn_refresh = QPushButton("刷新数据")
+        btn_refresh.clicked.connect(self._refresh_dashboard)
+        layout.addWidget(btn_refresh)
+
+        self.tabs.addTab(tab, "📊 统计看板")
+
+    def _create_stat_card(self, title: str, value: str, color: str, small: bool = False) -> QLabel:
+        label = QLabel()
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet(f"""
+            QLabel {{
+                background-color: {color};
+                color: white;
+                border-radius: 8px;
+                padding: {10 if small else 20}px;
+                font-size: {12 if small else 14}px;
+            }}
+        """)
+        label.setText(f"{title}\n<span style='font-size: {20 if small else 28}px; font-weight: bold;'>{value}</span>")
+        label.setTextFormat(Qt.RichText)
+        return label
+
+    def _refresh_dashboard(self):
+        if not self.current_building_id:
+            return
+
+        stats = self.deviation_calc.get_dashboard_stats(self.current_building_id)
+
+        self.dash_total_label.setText(
+            f"构件总数\n<span style='font-size: 28px; font-weight: bold;'>{stats.total_components}</span>")
+        self.dash_normal_label.setText(
+            f"合格构件\n<span style='font-size: 28px; font-weight: bold;'>{stats.normal_count}</span>")
+        self.dash_abnormal_label.setText(
+            f"异常构件\n<span style='font-size: 28px; font-weight: bold;'>{stats.abnormal_count}</span>")
+        self.dash_passrate_label.setText(
+            f"合格率\n<span style='font-size: 28px; font-weight: bold;'>{stats.pass_rate:.1f}%</span>")
+
+        self.dash_recheck_pending.setText(
+            f"待处理\n<span style='font-size: 20px; font-weight: bold;'>{stats.recheck_pending}</span>")
+        self.dash_recheck_inprogress.setText(
+            f"进行中\n<span style='font-size: 20px; font-weight: bold;'>{stats.recheck_in_progress}</span>")
+        self.dash_recheck_completed.setText(
+            f"已完成\n<span style='font-size: 20px; font-weight: bold;'>{stats.recheck_completed}</span>")
+
+        dev_text = (
+            f"长度偏差 - 平均: {stats.length_stats['avg']:.2f}mm  最大: {stats.length_stats['max']:.2f}mm\n"
+            f"宽度偏差 - 平均: {stats.width_stats['avg']:.2f}mm  最大: {stats.width_stats['max']:.2f}mm\n"
+            f"角度偏差 - 平均: {stats.angle_stats['avg']:.2f}°  最大: {stats.angle_stats['max']:.2f}°"
+        )
+        self.dash_dev_stats.setText(dev_text)
+
+        top_abnormal = self.deviation_calc.get_top_abnormal_components(
+            self.current_building_id, limit=10
+        )
+        self.dash_abnormal_table.setRowCount(len(top_abnormal))
+        for row, dev in enumerate(top_abnormal):
+            self.dash_abnormal_table.setItem(row, 0, QTableWidgetItem(dev.component.code))
+            ld = f"{dev.length_deviation.deviation:+.2f}" if dev.length_deviation else "-"
+            wd = f"{dev.width_deviation.deviation:+.2f}" if dev.width_deviation else "-"
+            ad = f"{dev.angle_deviation.deviation:+.2f}°" if dev.angle_deviation else "-"
+            self.dash_abnormal_table.setItem(row, 1, QTableWidgetItem(ld))
+            self.dash_abnormal_table.setItem(row, 2, QTableWidgetItem(wd))
+            self.dash_abnormal_table.setItem(row, 3, QTableWidgetItem(ad))
+
+            for col in range(4):
+                item = self.dash_abnormal_table.item(row, col)
+                if dev.is_abnormal:
+                    item.setBackground(QBrush(QColor("#FFC7CE")))
+
+        type_items = sorted(stats.abnormal_by_type.items(), key=lambda x: x[1], reverse=True)
+        self.dash_type_table.setRowCount(len(type_items))
+        for row, (ctype, count) in enumerate(type_items):
+            self.dash_type_table.setItem(row, 0, QTableWidgetItem(ctype))
+            self.dash_type_table.setItem(row, 1, QTableWidgetItem(str(count)))
 
     def _init_component_tab(self):
         tab = QWidget()
@@ -352,10 +506,37 @@ class MainWindow(QMainWindow):
 
     def _init_analysis_tab(self):
         tab = QWidget()
-        layout = QHBoxLayout(tab)
+        layout = QVBoxLayout(tab)
+
+        filter_bar = QHBoxLayout()
+        filter_bar.addWidget(QLabel("状态筛选："))
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(["全部", "正常", "异常", "需复测", "未检测"])
+        self.filter_combo.currentIndexChanged.connect(self._apply_filter)
+        filter_bar.addWidget(self.filter_combo)
+
+        filter_bar.addWidget(QLabel("类型筛选："))
+        self.type_filter_combo = QComboBox()
+        self.type_filter_combo.addItem("全部类型", "")
+        self.type_filter_combo.currentIndexChanged.connect(self._apply_filter)
+        filter_bar.addWidget(self.type_filter_combo)
+
+        filter_bar.addWidget(QLabel("搜索："))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("输入构件编号或名称...")
+        self.search_edit.textChanged.connect(self._apply_filter)
+        filter_bar.addWidget(self.search_edit, 1)
+
+        btn_clear_filter = QPushButton("重置筛选")
+        btn_clear_filter.clicked.connect(self._reset_filter)
+        filter_bar.addWidget(btn_clear_filter)
+
+        layout.addLayout(filter_bar)
+
+        main_layout = QHBoxLayout()
 
         left_panel = QWidget()
-        left_panel.setFixedWidth(280)
+        left_panel.setFixedWidth(300)
         left_layout = QVBoxLayout(left_panel)
 
         stats_group = QGroupBox("统计概览")
@@ -367,18 +548,20 @@ class MainWindow(QMainWindow):
 
         list_group = QGroupBox("构件偏差列表")
         list_layout = QVBoxLayout(list_group)
+        self.filter_count_label = QLabel("共 0 个构件")
+        list_layout.addWidget(self.filter_count_label)
         self.deviation_list = QListWidget()
         self.deviation_list.currentItemChanged.connect(self._on_deviation_selected)
-        list_layout.addWidget(self.deviation_list)
+        list_layout.addWidget(self.deviation_list, 1)
         left_layout.addWidget(list_group, 1)
 
         btn_layout = QHBoxLayout()
-        btn_mark = QPushButton("标记异常复测")
+        btn_mark = QPushButton("批量标记复测")
         btn_mark.clicked.connect(self._mark_abnormal_recheck)
         btn_layout.addWidget(btn_mark)
         left_layout.addLayout(btn_layout)
 
-        layout.addWidget(left_panel)
+        main_layout.addWidget(left_panel)
 
         right_panel = QTabWidget()
 
@@ -410,21 +593,136 @@ class MainWindow(QMainWindow):
         chart3_layout.addWidget(self.stats_chart)
         right_panel.addTab(chart3_tab, "统计图表")
 
-        layout.addWidget(right_panel, 1)
+        main_layout.addWidget(right_panel, 1)
 
-        self.tabs.addTab(tab, "偏差分析")
+        layout.addLayout(main_layout, 1)
+
+        self.tabs.addTab(tab, "📈 偏差分析")
+
+    def _init_recheck_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(QLabel("状态筛选："))
+        self.recheck_status_combo = QComboBox()
+        self.recheck_status_combo.addItems(["全部", "待处理", "进行中", "已完成", "已取消"])
+        self.recheck_status_combo.currentIndexChanged.connect(self._refresh_recheck_table)
+        top_bar.addWidget(self.recheck_status_combo)
+
+        btn_new_task = QPushButton("新建任务")
+        btn_new_task.clicked.connect(self._new_recheck_task)
+        btn_start = QPushButton("开始处理")
+        btn_start.clicked.connect(self._start_recheck_task)
+        btn_complete = QPushButton("完成任务")
+        btn_complete.clicked.connect(self._complete_recheck_task)
+        btn_cancel = QPushButton("取消任务")
+        btn_cancel.clicked.connect(self._cancel_recheck_task)
+        btn_batch_create = QPushButton("批量创建(异常)")
+        btn_batch_create.clicked.connect(self._batch_create_recheck_tasks)
+
+        top_bar.addStretch()
+        top_bar.addWidget(btn_new_task)
+        top_bar.addWidget(btn_start)
+        top_bar.addWidget(btn_complete)
+        top_bar.addWidget(btn_cancel)
+        top_bar.addWidget(btn_batch_create)
+        layout.addLayout(top_bar)
+
+        self.recheck_table = QTableWidget()
+        self.recheck_table.setColumnCount(8)
+        self.recheck_table.setHorizontalHeaderLabels(
+            ["任务ID", "构件编号", "状态", "优先级", "负责人", "原因", "创建时间", "更新时间"]
+        )
+        self.recheck_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.recheck_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.recheck_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.recheck_table.itemSelectionChanged.connect(self._on_recheck_selected)
+        layout.addWidget(self.recheck_table, 2)
+
+        detail_group = QGroupBox("任务详情")
+        detail_layout = QVBoxLayout(detail_group)
+        self.recheck_detail = QLabel("请选择一个任务查看详情")
+        self.recheck_detail.setWordWrap(True)
+        self.recheck_detail.setStyleSheet("background-color: #f5f5f5; padding: 10px; border-radius: 5px;")
+        detail_layout.addWidget(self.recheck_detail)
+        layout.addWidget(detail_group, 1)
+
+        self.tabs.addTab(tab, "🔄 复测任务")
+
+    def _init_history_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(QLabel("导入批次历史："))
+        btn_refresh_batches = QPushButton("刷新")
+        btn_refresh_batches.clicked.connect(self._refresh_import_batches)
+        top_bar.addStretch()
+        top_bar.addWidget(btn_refresh_batches)
+        layout.addLayout(top_bar)
+
+        splitter = QSplitter(Qt.Vertical)
+
+        batch_group = QGroupBox("导入批次")
+        batch_layout = QVBoxLayout(batch_group)
+        self.batch_table = QTableWidget()
+        self.batch_table.setColumnCount(7)
+        self.batch_table.setHorizontalHeaderLabels(
+            ["批次ID", "文件名", "总数", "成功", "失败", "状态", "创建时间"]
+        )
+        self.batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.batch_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.batch_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.batch_table.itemSelectionChanged.connect(self._on_batch_selected)
+        batch_layout.addWidget(self.batch_table)
+        splitter.addWidget(batch_group)
+
+        batch_error_group = QGroupBox("批次错误详情")
+        batch_error_layout = QVBoxLayout(batch_error_group)
+        self.batch_error_table = QTableWidget()
+        self.batch_error_table.setColumnCount(5)
+        self.batch_error_table.setHorizontalHeaderLabels(
+            ["行号", "构件编号", "错误类型", "错误信息", "原始数据"]
+        )
+        self.batch_error_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.batch_error_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        batch_error_layout.addWidget(self.batch_error_table)
+        splitter.addWidget(batch_error_group)
+
+        splitter.setSizes([200, 200])
+        layout.addWidget(splitter, 1)
+
+        bottom_bar = QHBoxLayout()
+        btn_rollback = QPushButton("回滚此批次")
+        btn_rollback.clicked.connect(self._rollback_batch)
+        bottom_bar.addStretch()
+        bottom_bar.addWidget(btn_rollback)
+        layout.addLayout(bottom_bar)
+
+        self.tabs.addTab(tab, "📜 历史追溯")
 
     def _init_report_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         top_bar = QHBoxLayout()
-        btn_generate = QPushButton("生成报告")
+        btn_generate = QPushButton("生成文本报告")
         btn_generate.clicked.connect(self._generate_report)
-        btn_save = QPushButton("保存为文件")
-        btn_save.clicked.connect(self._save_report)
+
+        btn_save_txt = QPushButton("导出 TXT")
+        btn_save_txt.clicked.connect(lambda: self._save_report("txt"))
+
+        btn_save_excel = QPushButton("导出 Excel")
+        btn_save_excel.clicked.connect(lambda: self._save_report("excel"))
+
+        btn_save_pdf = QPushButton("导出 PDF")
+        btn_save_pdf.clicked.connect(lambda: self._save_report("pdf"))
+
         top_bar.addWidget(btn_generate)
-        top_bar.addWidget(btn_save)
+        top_bar.addWidget(btn_save_txt)
+        top_bar.addWidget(btn_save_excel)
+        top_bar.addWidget(btn_save_pdf)
         top_bar.addStretch()
         layout.addLayout(top_bar)
 
@@ -433,7 +731,7 @@ class MainWindow(QMainWindow):
         self.report_text.setFont(QFont("Courier New", 10))
         layout.addWidget(self.report_text, 1)
 
-        self.tabs.addTab(tab, "报告生成")
+        self.tabs.addTab(tab, "📄 报告生成")
 
     def _refresh_building_list(self):
         self.building_list.clear()
@@ -458,6 +756,10 @@ class MainWindow(QMainWindow):
         self._refresh_component_table()
         self._refresh_mortise_table()
         self._refresh_deviation_analysis()
+        self._refresh_type_filter()
+        self._refresh_dashboard()
+        self._refresh_recheck_table()
+        self._refresh_import_batches()
 
     def _clear_all_data(self):
         self.component_table.setRowCount(0)
@@ -471,6 +773,21 @@ class MainWindow(QMainWindow):
         self.deviation_chart.clear()
         self.stats_chart.clear()
         self.report_text.clear()
+        self.recheck_table.setRowCount(0)
+        self.recheck_detail.setText("请选择一个任务查看详情")
+        self.batch_table.setRowCount(0)
+        self.batch_error_table.setRowCount(0)
+        self.dash_total_label.setText("构件总数\n<span style='font-size: 28px; font-weight: bold;'>-</span>")
+        self.dash_normal_label.setText("合格构件\n<span style='font-size: 28px; font-weight: bold;'>-</span>")
+        self.dash_abnormal_label.setText("异常构件\n<span style='font-size: 28px; font-weight: bold;'>-</span>")
+        self.dash_passrate_label.setText("合格率\n<span style='font-size: 28px; font-weight: bold;'>-</span>")
+        self.dash_recheck_pending.setText("待处理\n<span style='font-size: 20px; font-weight: bold;'>-</span>")
+        self.dash_recheck_inprogress.setText("进行中\n<span style='font-size: 20px; font-weight: bold;'>-</span>")
+        self.dash_recheck_completed.setText("已完成\n<span style='font-size: 20px; font-weight: bold;'>-</span>")
+        self.dash_dev_stats.setText("请选择建筑查看偏差统计")
+        self.dash_abnormal_table.setRowCount(0)
+        self.dash_type_table.setRowCount(0)
+        self.filter_count_label.setText("共 0 个构件")
 
     def _add_building(self):
         dlg = BuildingDialog(self)
@@ -906,21 +1223,525 @@ class MainWindow(QMainWindow):
         self.report_text.setText(report)
         self.statusBar().showMessage("报告已生成", 3000)
 
-    def _save_report(self):
+    def _save_report(self, format_type: str = "txt"):
         if not self.current_building_id:
             QMessageBox.information(self, "提示", "请先选择一个建筑")
             return
         building = self.db.get_building(self.current_building_id)
-        default_name = f"{building.name}_偏差报告.txt" if building else "偏差报告.txt"
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "保存报告", default_name, "文本文件 (*.txt)"
+
+        format_map = {
+            "txt": ("文本文件 (*.txt)", ".txt", "保存文本报告"),
+            "excel": ("Excel文件 (*.xlsx)", ".xlsx", "保存Excel报告"),
+            "pdf": ("PDF文件 (*.pdf)", ".pdf", "保存PDF报告"),
+        }
+        file_filter, ext, title = format_map.get(format_type, format_map["txt"])
+        default_name = f"{building.name}_偏差报告{ext}" if building else f"偏差报告{ext}"
+
+        file_path, _ = QFileDialog.getSaveFileName(self, title, default_name, file_filter)
+        if not file_path:
+            return
+
+        success = False
+        if format_type == "txt":
+            success = self.report_gen.save_report_to_file(self.current_building_id, file_path)
+        elif format_type == "excel":
+            success = self.report_gen.generate_excel_report(self.current_building_id, file_path)
+            if not success:
+                QMessageBox.warning(self, "提示",
+                    "生成Excel报告失败，请确保已安装 openpyxl 库\n"
+                    "安装命令：pip install openpyxl")
+                return
+        elif format_type == "pdf":
+            success = self.report_gen.generate_pdf_report(self.current_building_id, file_path)
+            if not success:
+                QMessageBox.warning(self, "提示",
+                    "生成PDF报告失败，请确保已安装 reportlab 库\n"
+                    "安装命令：pip install reportlab")
+                return
+
+        if success:
+            QMessageBox.information(self, "成功", f"报告已保存到：\n{file_path}")
+            self.statusBar().showMessage("报告已保存", 3000)
+        else:
+            QMessageBox.critical(self, "错误", "保存失败")
+
+    def _refresh_type_filter(self):
+        if not self.current_building_id:
+            return
+        types = self.deviation_calc.get_component_types(self.current_building_id)
+        self.type_filter_combo.clear()
+        self.type_filter_combo.addItem("全部类型", "")
+        for t in types:
+            self.type_filter_combo.addItem(t, t)
+
+    def _apply_filter(self):
+        if not self.current_building_id:
+            return
+
+        filter_idx = self.filter_combo.currentIndex()
+        filter_map = {
+            0: FilterStatus.ALL,
+            1: FilterStatus.NORMAL,
+            2: FilterStatus.ABNORMAL,
+            3: FilterStatus.RECHECK_NEEDED,
+            4: FilterStatus.NO_DATA,
+        }
+        status_filter = filter_map.get(filter_idx, FilterStatus.ALL)
+
+        component_type = self.type_filter_combo.currentData() or ""
+        search_keyword = self.search_edit.text().strip()
+
+        filtered = self.deviation_calc.filter_deviations(
+            self.current_building_id,
+            status_filter=status_filter,
+            component_type=component_type,
+            search_keyword=search_keyword
         )
-        if file_path:
-            if self.report_gen.save_report_to_file(self.current_building_id, file_path):
-                QMessageBox.information(self, "成功", f"报告已保存到：\n{file_path}")
-                self.statusBar().showMessage("报告已保存", 3000)
+
+        self._all_deviations = filtered
+        self.filter_count_label.setText(f"共 {len(filtered)} 个构件")
+
+        self.deviation_list.clear()
+        for dev in filtered:
+            text = dev.component.code
+            if dev.latest_record is None:
+                text += " (无数据)"
+                item = QListWidgetItem(text)
+                item.setForeground(QBrush(QColor("#888888")))
+            elif dev.is_abnormal:
+                text += " [异常]"
+                item = QListWidgetItem(text)
+                item.setForeground(QBrush(QColor("red")))
+            elif dev.recheck_needed:
+                text += " [需复测]"
+                item = QListWidgetItem(text)
+                item.setForeground(QBrush(QColor("#f39c12")))
             else:
-                QMessageBox.critical(self, "错误", "保存失败")
+                text += " [正常]"
+                item = QListWidgetItem(text)
+                item.setForeground(QBrush(QColor("green")))
+            item.setData(Qt.UserRole, dev)
+            self.deviation_list.addItem(item)
+
+        self._update_deviation_chart()
+
+        if filtered:
+            self.deviation_list.setCurrentRow(0)
+
+    def _reset_filter(self):
+        self.filter_combo.setCurrentIndex(0)
+        self.type_filter_combo.setCurrentIndex(0)
+        self.search_edit.clear()
+
+    def _refresh_recheck_table(self):
+        if not self.current_building_id:
+            return
+
+        status_idx = self.recheck_status_combo.currentIndex()
+        status_map = {
+            0: None,
+            1: RECHECK_STATUS_PENDING,
+            2: RECHECK_STATUS_IN_PROGRESS,
+            3: RECHECK_STATUS_COMPLETED,
+            4: RECHECK_STATUS_CANCELLED,
+        }
+        status_filter = status_map.get(status_idx)
+
+        tasks = self.recheck_service.get_tasks_by_building(
+            self.current_building_id, status_filter
+        )
+
+        self.recheck_table.setRowCount(len(tasks))
+        for row, task in enumerate(tasks):
+            status_text = self.recheck_service.get_task_status_text(task.status)
+            priority_text = self.recheck_service.get_priority_text(task.priority)
+
+            self.recheck_table.setItem(row, 0, QTableWidgetItem(str(task.id)))
+            self.recheck_table.setItem(row, 1, QTableWidgetItem(task.component_code))
+            self.recheck_table.setItem(row, 2, QTableWidgetItem(status_text))
+            self.recheck_table.setItem(row, 3, QTableWidgetItem(priority_text))
+            self.recheck_table.setItem(row, 4, QTableWidgetItem(task.assigned_to or "-"))
+            self.recheck_table.setItem(row, 5, QTableWidgetItem(task.reason or "-"))
+            self.recheck_table.setItem(row, 6, QTableWidgetItem(task.created_at))
+            self.recheck_table.setItem(row, 7, QTableWidgetItem(task.updated_at))
+
+            status_color_map = {
+                RECHECK_STATUS_PENDING: QColor("#f39c12"),
+                RECHECK_STATUS_IN_PROGRESS: QColor("#3498db"),
+                RECHECK_STATUS_COMPLETED: QColor("#2ecc71"),
+                RECHECK_STATUS_CANCELLED: QColor("#95a5a6"),
+            }
+            color = status_color_map.get(task.status, QColor("black"))
+            for col in range(8):
+                item = self.recheck_table.item(row, col)
+                if item:
+                    item.setForeground(QBrush(color))
+
+            item = self.recheck_table.item(row, 0)
+            item.setData(Qt.UserRole, task.id)
+
+    def _on_recheck_selected(self):
+        items = self.recheck_table.selectedItems()
+        if not items:
+            self.recheck_detail.setText("请选择一个任务查看详情")
+            return
+
+        row = items[0].row()
+        item = self.recheck_table.item(row, 0)
+        task_id = item.data(Qt.UserRole)
+
+        details = self.recheck_service.get_task_details(task_id)
+        if not details:
+            return
+
+        task = details["task"]
+        component = details["component"]
+        orig_rec = details["original_record"]
+        recheck_rec = details["recheck_record"]
+
+        status_text = self.recheck_service.get_task_status_text(task.status)
+        priority_text = self.recheck_service.get_priority_text(task.priority)
+
+        detail_html = f"""
+        <h3>任务 #{task.id} - {task.component_code}</h3>
+        <p><b>状态：</b>{status_text} &nbsp;&nbsp; <b>优先级：</b>{priority_text}</p>
+        <p><b>负责人：</b>{task.assigned_to or '未分配'}</p>
+        <p><b>创建时间：</b>{task.created_at}</p>
+        <p><b>更新时间：</b>{task.updated_at}</p>
+        <p><b>原因：</b>{task.reason or '-'}</p>
+        <hr>
+        <p><b>构件名称：</b>{component.name if component else '-'}</p>
+        <p><b>构件类型：</b>{component.component_type if component else '-'}</p>
+        """
+
+        if orig_rec:
+            detail_html += f"""
+            <h4>原始测量数据 (v{orig_rec.version})</h4>
+            <p>长度：{orig_rec.length:.2f} mm &nbsp; 宽度：{orig_rec.width:.2f} mm &nbsp; 角度：{orig_rec.angle:.2f}°</p>
+            <p>测量时间：{orig_rec.measure_time}</p>
+            """
+
+        if recheck_rec:
+            detail_html += f"""
+            <h4>复测数据 (v{recheck_rec.version})</h4>
+            <p>长度：{recheck_rec.length:.2f} mm &nbsp; 宽度：{recheck_rec.width:.2f} mm &nbsp; 角度：{recheck_rec.angle:.2f}°</p>
+            <p>测量时间：{recheck_rec.measure_time}</p>
+            <p><b>复测结果：</b>{task.recheck_result or '-'}</p>
+            """
+
+        if task.status == RECHECK_STATUS_COMPLETED and task.recheck_result:
+            detail_html += f"<p><b>备注：</b>{task.recheck_result}</p>"
+
+        self.recheck_detail.setText(detail_html)
+        self.recheck_detail.setTextFormat(Qt.RichText)
+
+    def _new_recheck_task(self):
+        if not self.current_building_id:
+            QMessageBox.information(self, "提示", "请先选择一个建筑")
+            return
+
+        components = self.db.get_components_by_building(self.current_building_id)
+        if not components:
+            QMessageBox.information(self, "提示", "该建筑暂无构件")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("新建复测任务")
+        dlg.setMinimumWidth(400)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        comp_combo = QComboBox()
+        for comp in components:
+            comp_combo.addItem(f"{comp.code} - {comp.name}", comp.id)
+
+        priority_combo = QComboBox()
+        priority_combo.addItems(["低", "中", "高"])
+        priority_combo.setCurrentIndex(1)
+
+        reason_edit = QLineEdit()
+        reason_edit.setPlaceholderText("请输入复测原因...")
+
+        assigned_edit = QLineEdit()
+        assigned_edit.setPlaceholderText("负责人（可选）")
+
+        form.addRow("选择构件 *", comp_combo)
+        form.addRow("优先级", priority_combo)
+        form.addRow("复测原因", reason_edit)
+        form.addRow("负责人", assigned_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() == QDialog.Accepted:
+            comp_id = comp_combo.currentData()
+            component = self.db.get_component(comp_id)
+            latest = self.db.get_latest_measurement(comp_id)
+
+            if not latest:
+                QMessageBox.warning(self, "提示", "该构件暂无测量记录，无法创建复测任务")
+                return
+
+            priority_map = {0: "low", 1: "normal", 2: "high"}
+            priority = priority_map[priority_combo.currentIndex()]
+
+            task_id = self.recheck_service.create_recheck_task(
+                building_id=self.current_building_id,
+                component_id=comp_id,
+                record_id=latest.id,
+                reason=reason_edit.text().strip(),
+                priority=priority,
+                assigned_to=assigned_edit.text().strip()
+            )
+
+            if task_id:
+                self.db.mark_for_recheck(latest.id, reason_edit.text().strip() or "手动标记需复测")
+                self._refresh_recheck_table()
+                self._refresh_deviation_analysis()
+                self._refresh_dashboard()
+                QMessageBox.information(self, "成功", f"复测任务已创建，任务ID：{task_id}")
+            else:
+                QMessageBox.warning(self, "提示", "创建失败，该构件可能已有进行中的复测任务")
+
+    def _start_recheck_task(self):
+        task_id = self._get_selected_recheck_task_id()
+        if not task_id:
+            return
+
+        name, ok = QInputDialog.getText(self, "开始处理", "请输入处理人姓名：")
+        if ok and name.strip():
+            if self.recheck_service.start_task(task_id, name.strip()):
+                self._refresh_recheck_table()
+                self._on_recheck_selected()
+                self.statusBar().showMessage("任务已开始处理", 3000)
+            else:
+                QMessageBox.warning(self, "提示", "任务状态不允许开始处理")
+
+    def _complete_recheck_task(self):
+        task_id = self._get_selected_recheck_task_id()
+        if not task_id:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("完成复测任务")
+        dlg.setMinimumWidth(400)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        length_spin = QDoubleSpinBox()
+        length_spin.setRange(0, 100000)
+        length_spin.setDecimals(2)
+        length_spin.setSuffix(" mm")
+
+        width_spin = QDoubleSpinBox()
+        width_spin.setRange(0, 100000)
+        width_spin.setDecimals(2)
+        width_spin.setSuffix(" mm")
+
+        angle_spin = QDoubleSpinBox()
+        angle_spin.setRange(0, 180)
+        angle_spin.setDecimals(2)
+        angle_spin.setSuffix(" °")
+
+        result_edit = QPlainTextEdit()
+        result_edit.setPlaceholderText("请输入复测结果说明...")
+        result_edit.setMaximumHeight(80)
+
+        form.addRow("复测长度 *", length_spin)
+        form.addRow("复测宽度 *", width_spin)
+        form.addRow("复测角度 *", angle_spin)
+        form.addRow("复测结果", result_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        task = self.recheck_service.get_task(task_id)
+        if task:
+            component = self.db.get_component(task.component_id)
+            if component:
+                length_spin.setValue(component.design_length)
+                width_spin.setValue(component.design_width)
+                angle_spin.setValue(component.design_angle)
+
+        if dlg.exec() == QDialog.Accepted:
+            task = self.recheck_service.get_task(task_id)
+            if not task:
+                return
+
+            component = self.db.get_component(task.component_id)
+            if not component:
+                return
+
+            latest_ver = self.db.get_latest_version(component.id)
+            new_rec = MeasurementRecord(
+                id=None,
+                component_id=component.id,
+                component_code=component.code,
+                length=length_spin.value(),
+                width=width_spin.value(),
+                angle=angle_spin.value(),
+                measure_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                version=latest_ver + 1,
+                is_recheck=True,
+                remark="复测数据"
+            )
+            new_rec_id = self.db.add_measurement_record(new_rec)
+
+            if self.recheck_service.complete_task(
+                task_id, new_rec_id, result_edit.toPlainText().strip()
+            ):
+                self._refresh_recheck_table()
+                self._refresh_deviation_analysis()
+                self._refresh_dashboard()
+                self._on_recheck_selected()
+                if self.current_component_id == component.id:
+                    self._refresh_history_table()
+                QMessageBox.information(self, "成功", "复测任务已完成")
+            else:
+                QMessageBox.warning(self, "提示", "完成任务失败")
+
+    def _cancel_recheck_task(self):
+        task_id = self._get_selected_recheck_task_id()
+        if not task_id:
+            return
+
+        reason, ok = QInputDialog.getText(self, "取消任务", "请输入取消原因：")
+        if ok:
+            if self.recheck_service.cancel_task(task_id, reason.strip()):
+                self._refresh_recheck_table()
+                self._on_recheck_selected()
+                self.statusBar().showMessage("任务已取消", 3000)
+            else:
+                QMessageBox.warning(self, "提示", "任务状态不允许取消")
+
+    def _batch_create_recheck_tasks(self):
+        if not self.current_building_id:
+            QMessageBox.information(self, "提示", "请先选择一个建筑")
+            return
+
+        reply = QMessageBox.question(self, "确认",
+            "确定要为所有异常构件批量创建复测任务吗？\n"
+            "已有进行中任务的构件将跳过。",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        count = self.recheck_service.batch_create_from_abnormal(
+            self.current_building_id,
+            reason="偏差超过阈值，需复测",
+            priority="normal"
+        )
+
+        self._refresh_recheck_table()
+        self._refresh_deviation_analysis()
+        self._refresh_dashboard()
+        QMessageBox.information(self, "完成", f"已创建 {count} 个复测任务")
+
+    def _get_selected_recheck_task_id(self) -> Optional[int]:
+        items = self.recheck_table.selectedItems()
+        if not items:
+            QMessageBox.information(self, "提示", "请先选择一个复测任务")
+            return None
+        row = items[0].row()
+        item = self.recheck_table.item(row, 0)
+        return item.data(Qt.UserRole)
+
+    def _refresh_import_batches(self):
+        if not self.current_building_id:
+            return
+
+        batches = self.db.get_import_batches_by_building(self.current_building_id)
+        self.batch_table.setRowCount(len(batches))
+
+        status_text_map = {
+            "draft": "草稿",
+            "processing": "处理中",
+            "completed": "已完成",
+            "completed_with_errors": "部分失败",
+            "failed": "失败",
+        }
+
+        for row, batch in enumerate(batches):
+            self.batch_table.setItem(row, 0, QTableWidgetItem(str(batch.id)))
+            self.batch_table.setItem(row, 1, QTableWidgetItem(batch.file_name))
+            self.batch_table.setItem(row, 2, QTableWidgetItem(str(batch.total_count)))
+            self.batch_table.setItem(row, 3, QTableWidgetItem(str(batch.success_count)))
+            self.batch_table.setItem(row, 4, QTableWidgetItem(str(batch.error_count)))
+
+            status = status_text_map.get(batch.status, batch.status)
+            self.batch_table.setItem(row, 5, QTableWidgetItem(status))
+            self.batch_table.setItem(row, 6, QTableWidgetItem(batch.created_at))
+
+            if batch.status == "failed":
+                color = QColor("#e74c3c")
+            elif batch.status == "completed_with_errors":
+                color = QColor("#f39c12")
+            else:
+                color = QColor("#2ecc71")
+
+            for col in range(7):
+                item = self.batch_table.item(row, col)
+                if item:
+                    item.setForeground(QBrush(color))
+
+            item = self.batch_table.item(row, 0)
+            item.setData(Qt.UserRole, batch.id)
+
+    def _on_batch_selected(self):
+        items = self.batch_table.selectedItems()
+        if not items:
+            self.batch_error_table.setRowCount(0)
+            return
+
+        row = items[0].row()
+        item = self.batch_table.item(row, 0)
+        batch_id = item.data(Qt.UserRole)
+
+        errors = self.db.get_import_errors_by_batch(batch_id)
+        self.batch_error_table.setRowCount(len(errors))
+
+        for i, err in enumerate(errors):
+            self.batch_error_table.setItem(i, 0, QTableWidgetItem(str(err.row_number)))
+            self.batch_error_table.setItem(i, 1, QTableWidgetItem(err.component_code))
+            self.batch_error_table.setItem(i, 2, QTableWidgetItem(err.error_type))
+            self.batch_error_table.setItem(i, 3, QTableWidgetItem(err.error_message))
+            self.batch_error_table.setItem(i, 4, QTableWidgetItem(err.row_data))
+
+    def _rollback_batch(self):
+        items = self.batch_table.selectedItems()
+        if not items:
+            QMessageBox.information(self, "提示", "请先选择一个导入批次")
+            return
+
+        reply = QMessageBox.warning(self, "确认回滚",
+            "确定要回滚此导入批次吗？\n"
+            "该批次导入的所有测量数据将被删除，相关的复测任务将被取消。\n"
+            "此操作不可恢复！",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        row = items[0].row()
+        item = self.batch_table.item(row, 0)
+        batch_id = item.data(Qt.UserRole)
+
+        if self.csv_importer.rollback_batch(batch_id):
+            self._refresh_import_batches()
+            self._refresh_deviation_analysis()
+            self._refresh_component_table()
+            self._refresh_dashboard()
+            self._refresh_recheck_table()
+            QMessageBox.information(self, "成功", "批次已回滚")
+        else:
+            QMessageBox.critical(self, "错误", "回滚失败")
 
     def closeEvent(self, event):
         self.db.close()

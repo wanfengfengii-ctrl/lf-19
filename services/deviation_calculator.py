@@ -1,7 +1,16 @@
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
+from enum import Enum
 
 from database import DatabaseManager, Component, MeasurementRecord
+
+
+class FilterStatus(Enum):
+    ALL = "all"
+    NORMAL = "normal"
+    ABNORMAL = "abnormal"
+    RECHECK_NEEDED = "recheck_needed"
+    NO_DATA = "no_data"
 
 
 @dataclass
@@ -26,6 +35,23 @@ class ComponentDeviation:
     latest_record: Optional[MeasurementRecord]
     is_abnormal: bool
     recheck_needed: bool
+
+
+@dataclass
+class DashboardStats:
+    total_components: int
+    has_data_count: int
+    no_data_count: int
+    normal_count: int
+    abnormal_count: int
+    recheck_pending: int
+    recheck_in_progress: int
+    recheck_completed: int
+    pass_rate: float
+    length_stats: Dict
+    width_stats: Dict
+    angle_stats: Dict
+    abnormal_by_type: Dict[str, int]
 
 
 class DeviationCalculator:
@@ -102,6 +128,36 @@ class DeviationCalculator:
             results.append(self.calculate_component_deviation(comp))
         return results
 
+    def filter_deviations(self, building_id: int,
+                          status_filter: FilterStatus = FilterStatus.ALL,
+                          component_type: str = "",
+                          search_keyword: str = "") -> List[ComponentDeviation]:
+        all_devs = self.calculate_building_deviations(building_id)
+        results = []
+
+        for dev in all_devs:
+            if status_filter == FilterStatus.NORMAL and dev.is_abnormal:
+                continue
+            if status_filter == FilterStatus.ABNORMAL and not dev.is_abnormal:
+                continue
+            if status_filter == FilterStatus.RECHECK_NEEDED and not dev.recheck_needed:
+                continue
+            if status_filter == FilterStatus.NO_DATA and dev.latest_record is not None:
+                continue
+
+            if component_type and dev.component.component_type != component_type:
+                continue
+
+            if search_keyword:
+                keyword = search_keyword.lower()
+                if (keyword not in dev.component.code.lower() and
+                        keyword not in dev.component.name.lower()):
+                    continue
+
+            results.append(dev)
+
+        return results
+
     def get_abnormal_components(self, building_id: int) -> List[ComponentDeviation]:
         all_devs = self.calculate_building_deviations(building_id)
         return [d for d in all_devs if d.is_abnormal]
@@ -141,6 +197,44 @@ class DeviationCalculator:
             "angle_stats": stats(angle_devs)
         }
 
+    def get_dashboard_stats(self, building_id: int) -> DashboardStats:
+        stats = self.get_deviation_statistics(building_id)
+        recheck_stats = self.db.get_recheck_statistics(building_id)
+
+        abnormal_by_type = {}
+        abnormal_list = self.get_abnormal_components(building_id)
+        for dev in abnormal_list:
+            ctype = dev.component.component_type or "未分类"
+            abnormal_by_type[ctype] = abnormal_by_type.get(ctype, 0) + 1
+
+        pass_rate = 0.0
+        if stats["total_components"] > 0:
+            pass_rate = stats["normal_count"] / stats["total_components"] * 100
+
+        return DashboardStats(
+            total_components=stats["total_components"],
+            has_data_count=stats["has_data_count"],
+            no_data_count=stats["no_data_count"],
+            normal_count=stats["normal_count"],
+            abnormal_count=stats["abnormal_count"],
+            recheck_pending=recheck_stats["pending"],
+            recheck_in_progress=recheck_stats["in_progress"],
+            recheck_completed=recheck_stats["completed"],
+            pass_rate=pass_rate,
+            length_stats=stats["length_stats"],
+            width_stats=stats["width_stats"],
+            angle_stats=stats["angle_stats"],
+            abnormal_by_type=abnormal_by_type
+        )
+
+    def get_component_types(self, building_id: int) -> List[str]:
+        components = self.db.get_components_by_building(building_id)
+        types = set()
+        for comp in components:
+            if comp.component_type:
+                types.add(comp.component_type)
+        return sorted(list(types))
+
     def mark_abnormal_for_recheck(self, building_id: int, remark: str = "偏差超过阈值，需复测") -> int:
         abnormal_devs = self.get_abnormal_components(building_id)
         count = 0
@@ -149,3 +243,21 @@ class DeviationCalculator:
                 self.db.mark_for_recheck(dev.latest_record.id, remark)
                 count += 1
         return count
+
+    def get_top_abnormal_components(self, building_id: int,
+                                     limit: int = 10,
+                                     dim_type: str = "length") -> List[ComponentDeviation]:
+        all_devs = self.calculate_building_deviations(building_id)
+        abnormal = [d for d in all_devs if d.is_abnormal]
+
+        def get_deviation_value(dev):
+            if dim_type == "length" and dev.length_deviation:
+                return abs(dev.length_deviation.deviation)
+            elif dim_type == "width" and dev.width_deviation:
+                return abs(dev.width_deviation.deviation)
+            elif dim_type == "angle" and dev.angle_deviation:
+                return abs(dev.angle_deviation.deviation)
+            return 0
+
+        abnormal.sort(key=get_deviation_value, reverse=True)
+        return abnormal[:limit]
