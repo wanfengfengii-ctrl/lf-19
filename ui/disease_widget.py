@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QComboBox,
     QGroupBox, QFormLayout, QTextEdit, QDoubleSpinBox, QDialog, QDialogButtonBox,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QFileDialog,
-    QScrollArea, QGridLayout, QSpinBox, QDateEdit, QTabWidget, QFrame
+    QScrollArea, QGridLayout, QSpinBox, QDateEdit, QTabWidget, QFrame,
+    QInputDialog
 )
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QFont, QBrush, QColor, QPixmap
@@ -14,13 +15,20 @@ from PySide6.QtGui import QFont, QBrush, QColor, QPixmap
 from database import (
     DatabaseManager, DiseaseRecord, DiseaseTreatment,
     DISEASE_TYPES, DISEASE_SEVERITIES, PRIORITIES, DISEASE_STATUSES,
-    DISEASE_STATUS_PENDING, DISEASE_STATUS_IN_PROGRESS,
-    DISEASE_STATUS_COMPLETED, DISEASE_STATUS_REVIEWED,
+    DISEASE_STATUS_DISCOVERED, DISEASE_STATUS_PENDING,
+    DISEASE_STATUS_ASSIGNED, DISEASE_STATUS_IN_PROGRESS,
+    DISEASE_STATUS_COMPLETED, DISEASE_STATUS_ACCEPTED,
+    DISEASE_STATUS_REVIEWED, DISEASE_STATUS_ARCHIVED,
     DISEASE_SEVERITY_MILD, DISEASE_SEVERITY_MODERATE,
     DISEASE_SEVERITY_SEVERE, DISEASE_SEVERITY_DANGEROUS,
     PRIORITY_LOW, PRIORITY_MEDIUM, PRIORITY_HIGH, PRIORITY_URGENT,
 )
 from services import DiseaseService, RepairSuggestion
+from .disease_advanced_widgets import (
+    DiseaseAcceptanceDialog, WorkflowStepWidget,
+    DiseasePhotoCompareWidget, DiseaseStatusHistoryWidget,
+    WarningListWidget,
+)
 
 
 class DiseaseDialog(QDialog):
@@ -474,33 +482,33 @@ class DiseaseManagementWidget(QWidget):
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
 
-        top_bar = QHBoxLayout()
+        filter_bar = QHBoxLayout()
 
-        top_bar.addWidget(QLabel("状态筛选："))
+        filter_bar.addWidget(QLabel("状态筛选："))
         self.status_combo = QComboBox()
         self.status_combo.addItem("全部", None)
         for code, name in DISEASE_STATUSES:
             self.status_combo.addItem(name, code)
         self.status_combo.currentIndexChanged.connect(self._refresh_table)
-        top_bar.addWidget(self.status_combo)
+        filter_bar.addWidget(self.status_combo)
 
-        top_bar.addWidget(QLabel("类型筛选："))
+        filter_bar.addWidget(QLabel("类型筛选："))
         self.type_combo = QComboBox()
         self.type_combo.addItem("全部", None)
         for code, name in DISEASE_TYPES:
             self.type_combo.addItem(name, code)
         self.type_combo.currentIndexChanged.connect(self._refresh_table)
-        top_bar.addWidget(self.type_combo)
+        filter_bar.addWidget(self.type_combo)
 
-        top_bar.addWidget(QLabel("等级筛选："))
+        filter_bar.addWidget(QLabel("等级筛选："))
         self.severity_combo = QComboBox()
         self.severity_combo.addItem("全部", None)
         for code, name in DISEASE_SEVERITIES:
             self.severity_combo.addItem(name, code)
         self.severity_combo.currentIndexChanged.connect(self._refresh_table)
-        top_bar.addWidget(self.severity_combo)
+        filter_bar.addWidget(self.severity_combo)
 
-        top_bar.addStretch()
+        filter_bar.addStretch()
 
         btn_add = QPushButton("新增病害")
         btn_add.clicked.connect(self._add_disease)
@@ -508,15 +516,12 @@ class DiseaseManagementWidget(QWidget):
         btn_edit.clicked.connect(self._edit_disease)
         btn_delete = QPushButton("删除病害")
         btn_delete.clicked.connect(self._delete_disease)
-        btn_treatment = QPushButton("添加处置")
-        btn_treatment.clicked.connect(self._add_treatment)
 
-        top_bar.addWidget(btn_add)
-        top_bar.addWidget(btn_edit)
-        top_bar.addWidget(btn_delete)
-        top_bar.addWidget(btn_treatment)
+        filter_bar.addWidget(btn_add)
+        filter_bar.addWidget(btn_edit)
+        filter_bar.addWidget(btn_delete)
 
-        main_layout.addLayout(top_bar)
+        main_layout.addLayout(filter_bar)
 
         splitter = QSplitter(Qt.Vertical)
 
@@ -532,33 +537,101 @@ class DiseaseManagementWidget(QWidget):
         self.disease_table.itemSelectionChanged.connect(self._on_disease_selected)
         splitter.addWidget(self.disease_table)
 
-        detail_group = QGroupBox("病害详情")
-        detail_layout = QVBoxLayout(detail_group)
+        detail_container = QWidget()
+        detail_layout = QVBoxLayout(detail_container)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+
+        action_bar = QHBoxLayout()
+        self.workflow_widget = WorkflowStepWidget(
+            self.service.get_workflow_steps(), None
+        )
+        action_bar.addWidget(self.workflow_widget, 1)
+        detail_layout.addLayout(action_bar)
+
+        status_action_bar = QHBoxLayout()
+        self.btn_assign = QPushButton("派单")
+        self.btn_assign.clicked.connect(self._on_assign)
+        self.btn_start = QPushButton("开始处置")
+        self.btn_start.clicked.connect(self._on_start_treatment)
+        self.btn_complete = QPushButton("完成处置")
+        self.btn_complete.clicked.connect(self._on_complete_treatment)
+        self.btn_accept = QPushButton("整改验收")
+        self.btn_accept.clicked.connect(self._on_accept)
+        self.btn_review = QPushButton("复查")
+        self.btn_review.clicked.connect(self._on_review)
+        self.btn_archive = QPushButton("归档")
+        self.btn_archive.clicked.connect(self._on_archive)
+        self.btn_reopen = QPushButton("重新打开")
+        self.btn_reopen.clicked.connect(self._on_reopen)
+        self.btn_add_treatment = QPushButton("添加处置记录")
+        self.btn_add_treatment.clicked.connect(self._add_treatment)
+
+        for btn in [self.btn_assign, self.btn_start, self.btn_complete,
+                    self.btn_accept, self.btn_review, self.btn_archive,
+                    self.btn_reopen, self.btn_add_treatment]:
+            btn.setEnabled(False)
+            status_action_bar.addWidget(btn)
+
+        status_action_bar.addStretch()
+        detail_layout.addLayout(status_action_bar)
+
+        self.detail_tabs = QTabWidget()
+
+        detail_tab = QWidget()
+        detail_tab_layout = QVBoxLayout(detail_tab)
+        detail_tab_layout.setContentsMargins(5, 5, 5, 5)
 
         self.detail_text = QLabel("请选择一条病害记录查看详情")
         self.detail_text.setWordWrap(True)
         self.detail_text.setStyleSheet("background-color: #f5f5f5; padding: 10px; border-radius: 5px;")
         self.detail_text.setAlignment(Qt.AlignTop)
-        detail_layout.addWidget(self.detail_text, 1)
+        detail_tab_layout.addWidget(self.detail_text, 1)
 
-        treatment_group = QGroupBox("处置记录")
-        treatment_layout = QVBoxLayout(treatment_group)
+        self.detail_tabs.addTab(detail_tab, "基本信息")
+
+        treatment_tab = QWidget()
+        treatment_tab_layout = QVBoxLayout(treatment_tab)
+        treatment_tab_layout.setContentsMargins(5, 5, 5, 5)
         self.treatment_list = QListWidget()
-        treatment_layout.addWidget(self.treatment_list)
+        treatment_tab_layout.addWidget(self.treatment_list)
+        self.detail_tabs.addTab(treatment_tab, "处置记录")
 
-        bottom_splitter = QSplitter(Qt.Horizontal)
-        bottom_splitter.addWidget(detail_group)
-        bottom_splitter.addWidget(treatment_group)
-        bottom_splitter.setSizes([300, 200])
+        self.photo_compare_widget = DiseasePhotoCompareWidget(self.db)
+        self.detail_tabs.addTab(self.photo_compare_widget, "图片对比")
 
-        splitter.addWidget(bottom_splitter)
-        splitter.setSizes([300, 200])
+        self.status_history_widget = DiseaseStatusHistoryWidget(self.db)
+        self.detail_tabs.addTab(self.status_history_widget, "状态历史")
+
+        acceptance_tab = QWidget()
+        acceptance_tab_layout = QVBoxLayout(acceptance_tab)
+        acceptance_tab_layout.setContentsMargins(5, 5, 5, 5)
+        self.acceptance_list = QListWidget()
+        acceptance_tab_layout.addWidget(self.acceptance_list)
+        self.detail_tabs.addTab(acceptance_tab, "验收记录")
+
+        detail_layout.addWidget(self.detail_tabs, 1)
+
+        splitter.addWidget(detail_container)
+        splitter.setSizes([250, 350])
 
         main_layout.addWidget(splitter, 1)
 
     def set_building(self, building_id: int):
+        if self.current_building_id != building_id:
+            self._clear_page_state()
         self.current_building_id = building_id
         self._refresh_table()
+
+    def _clear_page_state(self):
+        self.current_disease_id = None
+        self.disease_table.clearSelection()
+        self.detail_text.setText("请选择一条病害记录查看详情")
+        self.treatment_list.clear()
+        self.acceptance_list.clear()
+        self.photo_compare_widget.clear()
+        self.status_history_widget.clear()
+        self.workflow_widget.set_current_status(None)
+        self._update_action_buttons(None)
 
     def _refresh_table(self):
         if not self.current_building_id:
@@ -597,6 +670,17 @@ class DiseaseManagementWidget(QWidget):
             PRIORITY_URGENT: QColor("#e74c3c"),
         }
 
+        status_color_map = {
+            DISEASE_STATUS_DISCOVERED: QColor("#95a5a6"),
+            DISEASE_STATUS_PENDING: QColor("#f39c12"),
+            DISEASE_STATUS_ASSIGNED: QColor("#3498db"),
+            DISEASE_STATUS_IN_PROGRESS: QColor("#e67e22"),
+            DISEASE_STATUS_COMPLETED: QColor("#9b59b6"),
+            DISEASE_STATUS_ACCEPTED: QColor("#2ecc71"),
+            DISEASE_STATUS_REVIEWED: QColor("#1abc9c"),
+            DISEASE_STATUS_ARCHIVED: QColor("#7f8c8d"),
+        }
+
         for row, disease in enumerate(diseases):
             size_str = ""
             if disease.size_length > 0:
@@ -626,6 +710,9 @@ class DiseaseManagementWidget(QWidget):
                 elif col == 4:
                     color = priority_color_map.get(disease.priority, QColor("black"))
                     item.setForeground(QBrush(color))
+                elif col == 5:
+                    color = status_color_map.get(disease.status, QColor("black"))
+                    item.setForeground(QBrush(color))
                 self.disease_table.setItem(row, col, item)
 
             self.disease_table.item(row, 0).setData(Qt.UserRole, disease.id)
@@ -636,6 +723,11 @@ class DiseaseManagementWidget(QWidget):
             self.current_disease_id = None
             self.detail_text.setText("请选择一条病害记录查看详情")
             self.treatment_list.clear()
+            self.acceptance_list.clear()
+            self.photo_compare_widget.clear()
+            self.status_history_widget.clear()
+            self.workflow_widget.set_current_status(None)
+            self._update_action_buttons(None)
             return
 
         row = items[0].row()
@@ -646,6 +738,36 @@ class DiseaseManagementWidget(QWidget):
         if disease:
             self._show_disease_detail(disease)
             self._refresh_treatments(disease_id)
+            self._refresh_acceptances(disease_id)
+            self.photo_compare_widget.set_disease(disease_id)
+            self.status_history_widget.set_disease(disease_id)
+            self.workflow_widget.set_current_status(disease.status)
+            self._update_action_buttons(disease.status)
+
+    def _update_action_buttons(self, current_status: str):
+        has_selection = current_status is not None
+
+        self.btn_assign.setEnabled(False)
+        self.btn_start.setEnabled(False)
+        self.btn_complete.setEnabled(False)
+        self.btn_accept.setEnabled(False)
+        self.btn_review.setEnabled(False)
+        self.btn_archive.setEnabled(False)
+        self.btn_reopen.setEnabled(False)
+        self.btn_add_treatment.setEnabled(has_selection)
+
+        if not has_selection:
+            return
+
+        actions = self.service.get_allowed_status_actions(current_status)
+
+        self.btn_assign.setEnabled("assign" in actions)
+        self.btn_start.setEnabled("start" in actions)
+        self.btn_complete.setEnabled("complete" in actions)
+        self.btn_accept.setEnabled("accept" in actions)
+        self.btn_review.setEnabled("review" in actions)
+        self.btn_archive.setEnabled("archive" in actions)
+        self.btn_reopen.setEnabled("reopen" in actions)
 
     def _show_disease_detail(self, disease: DiseaseRecord):
         type_map = {code: name for code, name in DISEASE_TYPES}
@@ -700,6 +822,26 @@ class DiseaseManagementWidget(QWidget):
                 item.setToolTip(t.description)
             self.treatment_list.addItem(item)
 
+    def _refresh_acceptances(self, disease_id: int):
+        self.acceptance_list.clear()
+        acceptances = self.db.get_disease_acceptance_records(disease_id)
+
+        result_map = {code: name for code, name in [
+            ("pass", "通过"), ("fail", "不通过"), ("partial", "部分通过")
+        ]}
+
+        for a in acceptances:
+            review_text = "复查" if a.is_review else "验收"
+            result_name = result_map.get(a.acceptance_result, a.acceptance_result)
+            text = f"[{a.acceptance_date}] {review_text} - {result_name}"
+            if a.acceptance_person:
+                text += f" - {a.acceptance_person}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, a)
+            if a.acceptance_opinion:
+                item.setToolTip(a.acceptance_opinion)
+            self.acceptance_list.addItem(item)
+
     def _add_disease(self):
         if not self.current_building_id:
             QMessageBox.information(self, "提示", "请先选择一个建筑")
@@ -737,6 +879,7 @@ class DiseaseManagementWidget(QWidget):
 
                 self.db.update_disease_record(disease)
                 self._refresh_table()
+                self._on_disease_selected()
                 QMessageBox.information(self, "成功", "病害记录已更新")
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"更新失败：{str(e)}")
@@ -747,10 +890,11 @@ class DiseaseManagementWidget(QWidget):
             return
 
         reply = QMessageBox.question(self, "确认删除",
-            "确定要删除这条病害记录吗？所有处置记录也将被删除。",
+            "确定要删除这条病害记录吗？所有相关数据也将被删除。",
             QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             if self.db.delete_disease_record(self.current_disease_id):
+                self._clear_page_state()
                 self._refresh_table()
                 QMessageBox.information(self, "成功", "病害记录已删除")
             else:
@@ -772,6 +916,128 @@ class DiseaseManagementWidget(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"添加失败：{str(e)}")
 
+    def _on_assign(self):
+        if not self.current_disease_id:
+            return
+        handler, ok = QInputDialog.getText(self, "派单", "请输入负责人姓名：")
+        if ok and handler.strip():
+            result = self.service.assign_disease(
+                self.current_disease_id, handler.strip())
+            if result.success:
+                self._refresh_after_status()
+                QMessageBox.information(self, "成功", result.message)
+            else:
+                QMessageBox.warning(self, "失败", result.message)
+
+    def _on_start_treatment(self):
+        if not self.current_disease_id:
+            return
+        result = self.service.start_treatment(self.current_disease_id)
+        if result.success:
+            self._refresh_after_status()
+            QMessageBox.information(self, "成功", result.message)
+        else:
+            QMessageBox.warning(self, "失败", result.message)
+
+    def _on_complete_treatment(self):
+        if not self.current_disease_id:
+            return
+
+        dlg = DiseaseTreatmentDialog(self, disease_id=self.current_disease_id)
+        dlg.setWindowTitle("完成处置")
+        if dlg.exec() == QDialog.Accepted:
+            try:
+                data = dlg.get_data()
+                treatment = DiseaseTreatment(**data)
+                self.db.add_disease_treatment(treatment)
+                result = self.service.complete_treatment(self.current_disease_id)
+                if result.success:
+                    self._refresh_after_status()
+                    QMessageBox.information(self, "成功", result.message)
+                else:
+                    QMessageBox.warning(self, "失败", result.message)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"操作失败：{str(e)}")
+
+    def _on_accept(self):
+        if not self.current_disease_id:
+            return
+        dlg = DiseaseAcceptanceDialog(self, disease_id=self.current_disease_id,
+                                      db_manager=self.db, is_review=False)
+        if dlg.exec() == QDialog.Accepted:
+            try:
+                data = dlg.get_data()
+                result = self.service.accept_disease(
+                    self.current_disease_id,
+                    acceptance_result=data["acceptance_result"],
+                    acceptance_person=data["acceptance_person"],
+                    acceptance_date=data["acceptance_date"],
+                    acceptance_opinion=data["acceptance_opinion"],
+                    photo_paths=data["photo_paths"],
+                )
+                if result.success:
+                    self._refresh_after_status()
+                    QMessageBox.information(self, "成功", result.message)
+                else:
+                    QMessageBox.warning(self, "失败", result.message)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"验收失败：{str(e)}")
+
+    def _on_review(self):
+        if not self.current_disease_id:
+            return
+        dlg = DiseaseAcceptanceDialog(self, disease_id=self.current_disease_id,
+                                      db_manager=self.db, is_review=True)
+        if dlg.exec() == QDialog.Accepted:
+            try:
+                data = dlg.get_data()
+                result = self.service.review_disease(
+                    self.current_disease_id,
+                    acceptance_result=data["acceptance_result"],
+                    acceptance_person=data["acceptance_person"],
+                    acceptance_date=data["acceptance_date"],
+                    acceptance_opinion=data["acceptance_opinion"],
+                    photo_paths=data["photo_paths"],
+                )
+                if result.success:
+                    self._refresh_after_status()
+                    QMessageBox.information(self, "成功", result.message)
+                else:
+                    QMessageBox.warning(self, "失败", result.message)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"复查失败：{str(e)}")
+
+    def _on_archive(self):
+        if not self.current_disease_id:
+            return
+        reply = QMessageBox.question(self, "确认归档",
+            "确定要归档这条病害记录吗？归档后将无法直接编辑。",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            result = self.service.archive_disease(self.current_disease_id)
+            if result.success:
+                self._refresh_after_status()
+                QMessageBox.information(self, "成功", result.message)
+            else:
+                QMessageBox.warning(self, "失败", result.message)
+
+    def _on_reopen(self):
+        if not self.current_disease_id:
+            return
+        reason, ok = QInputDialog.getText(self, "重新打开", "请输入重新打开的原因：")
+        if ok:
+            result = self.service.reopen_disease(
+                self.current_disease_id, remark=reason)
+            if result.success:
+                self._refresh_after_status()
+                QMessageBox.information(self, "成功", result.message)
+            else:
+                QMessageBox.warning(self, "失败", result.message)
+
+    def _refresh_after_status(self):
+        self._refresh_table()
+        self._on_disease_selected()
+
     def refresh(self):
         self._refresh_table()
 
@@ -788,30 +1054,51 @@ class DiseaseDashboardWidget(QWidget):
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
 
-        stats_group = QGroupBox("病害总览")
+        self.dashboard_tabs = QTabWidget()
+
+        overview_tab = QWidget()
+        overview_layout = QVBoxLayout(overview_tab)
+
+        stats_group = QGroupBox("病害状态总览")
         stats_layout = QGridLayout(stats_group)
 
         self.card_total = self._create_stat_card("病害总数", "-", "#3498db")
-        self.card_pending = self._create_stat_card("待处理", "-", "#f39c12")
-        self.card_in_progress = self._create_stat_card("处理中", "-", "#3498db")
-        self.card_completed = self._create_stat_card("已完成", "-", "#2ecc71")
-
         stats_layout.addWidget(self.card_total, 0, 0)
-        stats_layout.addWidget(self.card_pending, 0, 1)
-        stats_layout.addWidget(self.card_in_progress, 0, 2)
-        stats_layout.addWidget(self.card_completed, 0, 3)
+
+        status_cards = [
+            ("已发现", DISEASE_STATUS_DISCOVERED, "#95a5a6"),
+            ("待派单", DISEASE_STATUS_PENDING, "#f39c12"),
+            ("已派单", DISEASE_STATUS_ASSIGNED, "#3498db"),
+            ("处置中", DISEASE_STATUS_IN_PROGRESS, "#e67e22"),
+            ("已完成", DISEASE_STATUS_COMPLETED, "#9b59b6"),
+            ("已验收", DISEASE_STATUS_ACCEPTED, "#2ecc71"),
+            ("已复查", DISEASE_STATUS_REVIEWED, "#1abc9c"),
+            ("已归档", DISEASE_STATUS_ARCHIVED, "#7f8c8d"),
+        ]
+
+        for i, (name, code, color) in enumerate(status_cards):
+            card = self._create_stat_card(name, "-", color, small=True)
+            setattr(self, f"card_{code}", card)
+            col = i % 4
+            row = (i // 4) + 1
+            stats_layout.addWidget(card, row, col)
+
+        overview_layout.addWidget(stats_group)
+
+        key_metrics_group = QGroupBox("关键指标")
+        metrics_layout = QHBoxLayout(key_metrics_group)
 
         self.card_urgent = self._create_stat_card("紧急待处理", "-", "#e74c3c", small=True)
         self.card_severe = self._create_stat_card("严重病害", "-", "#e67e22", small=True)
         self.card_cost = self._create_stat_card("预估总费用", "-", "#9b59b6", small=True)
         self.card_rate = self._create_stat_card("处置完成率", "-", "#1abc9c", small=True)
 
-        stats_layout.addWidget(self.card_urgent, 1, 0)
-        stats_layout.addWidget(self.card_severe, 1, 1)
-        stats_layout.addWidget(self.card_cost, 1, 2)
-        stats_layout.addWidget(self.card_rate, 1, 3)
+        metrics_layout.addWidget(self.card_urgent)
+        metrics_layout.addWidget(self.card_severe)
+        metrics_layout.addWidget(self.card_cost)
+        metrics_layout.addWidget(self.card_rate)
 
-        main_layout.addWidget(stats_group)
+        overview_layout.addWidget(key_metrics_group)
 
         middle_row = QHBoxLayout()
 
@@ -845,7 +1132,7 @@ class DiseaseDashboardWidget(QWidget):
         priority_layout.addWidget(self.priority_table)
         middle_row.addWidget(priority_group, 1)
 
-        main_layout.addLayout(middle_row, 1)
+        overview_layout.addLayout(middle_row, 1)
 
         bottom_group = QGroupBox("待处理紧急病害")
         bottom_layout = QVBoxLayout(bottom_group)
@@ -859,7 +1146,40 @@ class DiseaseDashboardWidget(QWidget):
         self.urgent_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         bottom_layout.addWidget(self.urgent_table)
 
-        main_layout.addWidget(bottom_group, 1)
+        overview_layout.addWidget(bottom_group, 1)
+
+        self.dashboard_tabs.addTab(overview_tab, "总览")
+
+        warning_tab = QWidget()
+        warning_layout = QVBoxLayout(warning_tab)
+        self.warning_widget = WarningListWidget(self.db)
+        warning_layout.addWidget(self.warning_widget)
+        self.dashboard_tabs.addTab(warning_tab, "预警中心")
+
+        risk_tab = QWidget()
+        risk_layout = QVBoxLayout(risk_tab)
+
+        risk_info = QLabel("偏差-病害联动风险分析")
+        risk_info.setStyleSheet("font-size: 14px; font-weight: bold; padding: 5px;")
+        risk_layout.addWidget(risk_info)
+
+        self.risk_table = QTableWidget()
+        self.risk_table.setColumnCount(5)
+        self.risk_table.setHorizontalHeaderLabels(
+            ["构件编号", "偏差等级", "病害数量", "综合风险等级", "建议措施"]
+        )
+        self.risk_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.risk_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.risk_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        risk_layout.addWidget(self.risk_table, 1)
+
+        btn_risk_refresh = QPushButton("重新计算风险")
+        btn_risk_refresh.clicked.connect(self._recalculate_risk)
+        risk_layout.addWidget(btn_risk_refresh)
+
+        self.dashboard_tabs.addTab(risk_tab, "风险分析")
+
+        main_layout.addWidget(self.dashboard_tabs, 1)
 
         btn_row = QHBoxLayout()
         btn_refresh = QPushButton("刷新数据")
@@ -888,8 +1208,13 @@ class DiseaseDashboardWidget(QWidget):
         return label
 
     def set_building(self, building_id: int):
+        if self.current_building_id != building_id:
+            self._clear_page_state()
         self.current_building_id = building_id
         self.refresh()
+
+    def _clear_page_state(self):
+        self._clear_all()
 
     def refresh(self):
         if not self.current_building_id:
@@ -901,15 +1226,27 @@ class DiseaseDashboardWidget(QWidget):
 
         self.card_total.setText(
             f"病害总数\n<span style='font-size: 28px; font-weight: bold;'>{stats.total_count}</span>")
-        self.card_pending.setText(
-            f"待处理\n<span style='font-size: 28px; font-weight: bold;'>{stats.pending_count}</span>")
-        self.card_in_progress.setText(
-            f"处理中\n<span style='font-size: 28px; font-weight: bold;'>{stats.in_progress_count}</span>")
-        self.card_completed.setText(
-            f"已完成\n<span style='font-size: 28px; font-weight: bold;'>{stats.completed_count + stats.reviewed_count}</span>")
+
+        status_codes = [
+            DISEASE_STATUS_DISCOVERED, DISEASE_STATUS_PENDING,
+            DISEASE_STATUS_ASSIGNED, DISEASE_STATUS_IN_PROGRESS,
+            DISEASE_STATUS_COMPLETED, DISEASE_STATUS_ACCEPTED,
+            DISEASE_STATUS_REVIEWED, DISEASE_STATUS_ARCHIVED,
+        ]
+
+        for code in status_codes:
+            card = getattr(self, f"card_{code}", None)
+            if card:
+                count = stats.by_status.get(code, 0)
+                title = card.text().split('\n')[0]
+                card.setText(f"{title}\n<span style='font-size: 20px; font-weight: bold;'>{count}</span>")
 
         severe_count = stats.by_severity.get(DISEASE_SEVERITY_SEVERE, 0) + \
                        stats.by_severity.get(DISEASE_SEVERITY_DANGEROUS, 0)
+
+        pending_active = (stats.by_status.get(DISEASE_STATUS_PENDING, 0) +
+                         stats.by_status.get(DISEASE_STATUS_ASSIGNED, 0) +
+                         stats.by_status.get(DISEASE_STATUS_IN_PROGRESS, 0))
 
         self.card_urgent.setText(
             f"紧急待处理\n<span style='font-size: 20px; font-weight: bold;'>{progress['pending_urgent']}</span>")
@@ -946,7 +1283,8 @@ class DiseaseDashboardWidget(QWidget):
 
         diseases = self.db.get_diseases_by_building(self.current_building_id)
         urgent_diseases = [d for d in diseases
-                          if d.status in [DISEASE_STATUS_PENDING, DISEASE_STATUS_IN_PROGRESS]
+                          if d.status in [DISEASE_STATUS_PENDING, DISEASE_STATUS_ASSIGNED,
+                                         DISEASE_STATUS_IN_PROGRESS]
                           and d.priority == PRIORITY_URGENT]
 
         self.urgent_table.setRowCount(len(urgent_diseases))
@@ -957,16 +1295,100 @@ class DiseaseDashboardWidget(QWidget):
             self.urgent_table.setItem(row, 3, QTableWidgetItem(priority_map.get(d.priority, d.priority)))
             self.urgent_table.setItem(row, 4, QTableWidgetItem(d.created_at))
 
+        self.warning_widget.set_building(self.current_building_id)
+
+        self._refresh_risk_table()
+
+    def _refresh_risk_table(self):
+        if not self.current_building_id or not self.db:
+            self.risk_table.setRowCount(0)
+            return
+
+        links = self.db.get_deviation_disease_links(self.current_building_id)
+
+        from database import RISK_LEVELS
+
+        risk_level_map = {code: name for code, name in RISK_LEVELS}
+        risk_color_map = {
+            "low": QColor("#2ecc71"),
+            "medium": QColor("#f39c12"),
+            "high": QColor("#e67e22"),
+            "critical": QColor("#e74c3c"),
+        }
+
+        suggestion_map = {
+            "low": "常规监控",
+            "medium": "加强观察",
+            "high": "建议修缮",
+            "critical": "紧急处置",
+        }
+
+        self.risk_table.setRowCount(len(links))
+        for row, link in enumerate(links):
+            items = [
+                QTableWidgetItem(link.component_code),
+                QTableWidgetItem(str(link.deviation_level or "-")),
+                QTableWidgetItem(str(link.disease_count)),
+                QTableWidgetItem(risk_level_map.get(link.risk_level, link.risk_level)),
+                QTableWidgetItem(suggestion_map.get(link.risk_level, "-")),
+            ]
+
+            color = risk_color_map.get(link.risk_level, QColor("black"))
+            for item in items:
+                item.setForeground(QBrush(color))
+
+            for col, item in enumerate(items):
+                self.risk_table.setItem(row, col, item)
+
+    def _recalculate_risk(self):
+        if not self.current_building_id:
+            QMessageBox.information(self, "提示", "请先选择一个建筑")
+            return
+
+        try:
+            count = self.service.update_all_deviation_disease_links(self.current_building_id)
+            self._refresh_risk_table()
+            QMessageBox.information(self, "完成", f"已重新计算 {count} 个构件的风险等级")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"计算失败：{str(e)}")
+
     def _clear_all(self):
-        for card in [self.card_total, self.card_pending, self.card_in_progress,
-                    self.card_completed, self.card_urgent, self.card_severe,
-                    self.card_cost, self.card_rate]:
-            card.setText(card.text().split('\n')[0] + "\n<span style='font-size: 28px; font-weight: bold;'>-</span>")
+        self.card_total.setText(
+            "病害总数\n<span style='font-size: 28px; font-weight: bold;'>-</span>")
+
+        status_codes = [
+            DISEASE_STATUS_DISCOVERED, DISEASE_STATUS_PENDING,
+            DISEASE_STATUS_ASSIGNED, DISEASE_STATUS_IN_PROGRESS,
+            DISEASE_STATUS_COMPLETED, DISEASE_STATUS_ACCEPTED,
+            DISEASE_STATUS_REVIEWED, DISEASE_STATUS_ARCHIVED,
+        ]
+        status_names = {
+            DISEASE_STATUS_DISCOVERED: "已发现",
+            DISEASE_STATUS_PENDING: "待派单",
+            DISEASE_STATUS_ASSIGNED: "已派单",
+            DISEASE_STATUS_IN_PROGRESS: "处置中",
+            DISEASE_STATUS_COMPLETED: "已完成",
+            DISEASE_STATUS_ACCEPTED: "已验收",
+            DISEASE_STATUS_REVIEWED: "已复查",
+            DISEASE_STATUS_ARCHIVED: "已归档",
+        }
+
+        for code in status_codes:
+            card = getattr(self, f"card_{code}", None)
+            if card:
+                name = status_names.get(code, code)
+                card.setText(f"{name}\n<span style='font-size: 20px; font-weight: bold;'>-</span>")
+
+        for card in [self.card_urgent, self.card_severe, self.card_cost, self.card_rate]:
+            title = card.text().split('\n')[0]
+            card.setText(f"{title}\n<span style='font-size: 20px; font-weight: bold;'>-</span>")
 
         self.type_table.setRowCount(0)
         self.severity_table.setRowCount(0)
         self.priority_table.setRowCount(0)
         self.urgent_table.setRowCount(0)
+        self.risk_table.setRowCount(0)
+        self.warning_widget.clear()
 
     def _regenerate_all_suggestions(self):
         if not self.current_building_id:

@@ -9,9 +9,21 @@ from .models import (
     RECHECK_STATUS_PENDING, RECHECK_STATUS_IN_PROGRESS,
     RECHECK_STATUS_COMPLETED, RECHECK_STATUS_CANCELLED,
     DiseaseRecord, DiseaseTreatment, DiseaseStats,
+    DiseaseStatusHistory, DiseaseAcceptanceRecord,
+    DiseasePhotoArchive, WarningRecord, OperationLog,
+    DeviationDiseaseLink,
     DISEASE_STATUS_PENDING, DISEASE_STATUS_IN_PROGRESS,
     DISEASE_STATUS_COMPLETED, DISEASE_STATUS_REVIEWED,
+    DISEASE_STATUS_DISCOVERED, DISEASE_STATUS_ASSIGNED,
+    DISEASE_STATUS_ACCEPTED, DISEASE_STATUS_ARCHIVED,
+    DISEASE_STATUS_REJECTED,
     DISEASE_TYPES, DISEASE_SEVERITIES, PRIORITIES,
+    ACCEPTANCE_RESULT_PASS, ACCEPTANCE_RESULT_FAIL,
+    PHOTO_TYPE_BEFORE, PHOTO_TYPE_AFTER, PHOTO_TYPE_PROCESS,
+    WARNING_LEVEL_INFO, WARNING_LEVEL_WARNING, WARNING_LEVEL_DANGER,
+    WARNING_TYPE_DEVIATION, WARNING_TYPE_DISEASE, WARNING_TYPE_RISK,
+    MODULE_DISEASE, ACTION_STATUS_CHANGE,
+    RISK_LEVEL_LOW, RISK_LEVEL_MEDIUM, RISK_LEVEL_HIGH, RISK_LEVEL_CRITICAL,
 )
 
 
@@ -197,6 +209,102 @@ class DatabaseManager:
         ''')
 
         cursor.execute('''
+        CREATE TABLE IF NOT EXISTS disease_status_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            disease_id INTEGER NOT NULL,
+            from_status TEXT NOT NULL,
+            to_status TEXT NOT NULL,
+            operator TEXT DEFAULT '',
+            remark TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (disease_id) REFERENCES disease_records(id) ON DELETE CASCADE
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS disease_acceptance_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            disease_id INTEGER NOT NULL,
+            acceptance_result TEXT NOT NULL,
+            acceptance_opinion TEXT DEFAULT '',
+            acceptor TEXT DEFAULT '',
+            acceptance_date TEXT DEFAULT '',
+            photo_paths TEXT DEFAULT '',
+            remark TEXT DEFAULT '',
+            is_review INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (disease_id) REFERENCES disease_records(id) ON DELETE CASCADE
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS disease_photo_archives (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            disease_id INTEGER NOT NULL,
+            photo_path TEXT NOT NULL,
+            photo_type TEXT DEFAULT '',
+            photo_stage TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            upload_time TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (disease_id) REFERENCES disease_records(id) ON DELETE CASCADE
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS warning_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            building_id INTEGER NOT NULL,
+            component_id INTEGER NOT NULL,
+            component_code TEXT NOT NULL,
+            warning_type TEXT NOT NULL,
+            warning_level TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            related_disease_id INTEGER DEFAULT NULL,
+            related_record_id INTEGER DEFAULT NULL,
+            is_read INTEGER DEFAULT 0,
+            is_handled INTEGER DEFAULT 0,
+            handle_remark TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            handled_at TEXT DEFAULT '',
+            FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE CASCADE,
+            FOREIGN KEY (component_id) REFERENCES components(id) ON DELETE CASCADE
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS operation_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            module TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id INTEGER DEFAULT NULL,
+            operator TEXT DEFAULT '',
+            detail TEXT DEFAULT '',
+            ip_address TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS deviation_disease_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            component_id INTEGER NOT NULL UNIQUE,
+            component_code TEXT NOT NULL,
+            deviation_level TEXT NOT NULL,
+            disease_count INTEGER DEFAULT 0,
+            risk_level TEXT NOT NULL,
+            assessment TEXT DEFAULT '',
+            suggestion TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (component_id) REFERENCES components(id) ON DELETE CASCADE
+        )
+        ''')
+
+        cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_measurement_component_idx ON measurement_records(component_id)
         ''')
         cursor.execute('''
@@ -237,6 +345,46 @@ class DatabaseManager:
         ''')
         cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_disease_treatment_disease_idx ON disease_treatments(disease_id)
+        ''')
+
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_status_history_disease_idx ON disease_status_history(disease_id)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_acceptance_disease_idx ON disease_acceptance_records(disease_id)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_photo_disease_idx ON disease_photo_archives(disease_id)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_disease_photo_type_idx ON disease_photo_archives(photo_type)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_warning_building_idx ON warning_records(building_id)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_warning_component_idx ON warning_records(component_id)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_warning_type_idx ON warning_records(warning_type)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_warning_level_idx ON warning_records(warning_level)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_operation_module_idx ON operation_logs(module)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_operation_action_idx ON operation_logs(action)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_operation_created_idx ON operation_logs(created_at)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_deviation_disease_component_idx ON deviation_disease_links(component_id)
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_deviation_disease_risk_idx ON deviation_disease_links(risk_level)
         ''')
 
         self.conn.commit()
@@ -789,7 +937,11 @@ class DatabaseManager:
             WHERE building_id=? GROUP BY status
         """, (building_id,))
         status_rows = cursor.fetchall()
-        status_counts = {"pending": 0, "in_progress": 0, "completed": 0, "reviewed": 0}
+        status_counts = {
+            "pending": 0, "in_progress": 0, "completed": 0, "reviewed": 0,
+            "discovered": 0, "assigned": 0, "accepted": 0,
+            "archived": 0, "rejected": 0
+        }
         total = 0
         for row in status_rows:
             status_counts[row["status"]] = row["cnt"]
@@ -835,6 +987,11 @@ class DatabaseManager:
             in_progress_count=status_counts["in_progress"],
             completed_count=status_counts["completed"],
             reviewed_count=status_counts["reviewed"],
+            discovered_count=status_counts["discovered"],
+            assigned_count=status_counts["assigned"],
+            accepted_count=status_counts["accepted"],
+            archived_count=status_counts["archived"],
+            rejected_count=status_counts["rejected"],
             by_type=by_type,
             by_severity=by_severity,
             by_priority=by_priority,
@@ -869,3 +1026,457 @@ class DatabaseManager:
         )
         rows = cursor.fetchall()
         return [DiseaseTreatment(**dict(row)) for row in rows]
+
+    # ==================== 病害状态历史相关方法 ====================
+
+    def add_disease_status_history(self, history: DiseaseStatusHistory) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO disease_status_history
+               (disease_id, from_status, to_status, operator, remark, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (history.disease_id, history.from_status, history.to_status,
+             history.operator, history.remark, history.created_at)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_status_history_by_disease(self, disease_id: int) -> List[DiseaseStatusHistory]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM disease_status_history WHERE disease_id=? ORDER BY created_at DESC",
+            (disease_id,)
+        )
+        rows = cursor.fetchall()
+        return [DiseaseStatusHistory(**dict(row)) for row in rows]
+
+    def get_latest_status_history(self, disease_id: int) -> Optional[DiseaseStatusHistory]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM disease_status_history WHERE disease_id=? ORDER BY created_at DESC LIMIT 1",
+            (disease_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return DiseaseStatusHistory(**dict(row))
+        return None
+
+    # ==================== 病害验收记录相关方法 ====================
+
+    def add_disease_acceptance(self, record: DiseaseAcceptanceRecord) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO disease_acceptance_records
+               (disease_id, acceptance_result, acceptance_opinion, acceptor,
+                acceptance_date, photo_paths, remark, is_review, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (record.disease_id, record.acceptance_result, record.acceptance_opinion,
+             record.acceptor, record.acceptance_date, record.photo_paths,
+             record.remark, 1 if record.is_review else 0, record.created_at)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_acceptance_by_disease(self, disease_id: int) -> List[DiseaseAcceptanceRecord]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM disease_acceptance_records WHERE disease_id=? ORDER BY created_at DESC",
+            (disease_id,)
+        )
+        rows = cursor.fetchall()
+        return [DiseaseAcceptanceRecord(**dict(row)) for row in rows]
+
+    def get_latest_acceptance(self, disease_id: int) -> Optional[DiseaseAcceptanceRecord]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM disease_acceptance_records WHERE disease_id=? ORDER BY created_at DESC LIMIT 1",
+            (disease_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return DiseaseAcceptanceRecord(**dict(row))
+        return None
+
+    # ==================== 病害图片归档相关方法 ====================
+
+    def add_disease_photo(self, photo: DiseasePhotoArchive) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO disease_photo_archives
+               (disease_id, photo_path, photo_type, photo_stage, description,
+                upload_time, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (photo.disease_id, photo.photo_path, photo.photo_type,
+             photo.photo_stage, photo.description, photo.upload_time,
+             photo.created_at)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def delete_disease_photo(self, photo_id: int) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM disease_photo_archives WHERE id=?", (photo_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_photos_by_disease(self, disease_id: int, photo_type: str = None,
+                               photo_stage: str = None) -> List[DiseasePhotoArchive]:
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM disease_photo_archives WHERE disease_id=?"
+        params = [disease_id]
+        if photo_type:
+            query += " AND photo_type=?"
+            params.append(photo_type)
+        if photo_stage:
+            query += " AND photo_stage=?"
+            params.append(photo_stage)
+        query += " ORDER BY created_at DESC"
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [DiseasePhotoArchive(**dict(row)) for row in rows]
+
+    def get_photos_by_type(self, disease_id: int, photo_type: str) -> List[DiseasePhotoArchive]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM disease_photo_archives WHERE disease_id=? AND photo_type=? ORDER BY created_at DESC",
+            (disease_id, photo_type)
+        )
+        rows = cursor.fetchall()
+        return [DiseasePhotoArchive(**dict(row)) for row in rows]
+
+    # ==================== 预警记录相关方法 ====================
+
+    def add_warning(self, warning: WarningRecord) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO warning_records
+               (building_id, component_id, component_code, warning_type, warning_level,
+                title, description, source, related_disease_id, related_record_id,
+                is_read, is_handled, handle_remark, created_at, handled_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (warning.building_id, warning.component_id, warning.component_code,
+             warning.warning_type, warning.warning_level, warning.title,
+             warning.description, warning.source, warning.related_disease_id,
+             warning.related_record_id, 1 if warning.is_read else 0,
+             1 if warning.is_handled else 0, warning.handle_remark,
+             warning.created_at, warning.handled_at)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def update_warning(self, warning_id: int, **kwargs) -> bool:
+        if not kwargs:
+            return False
+        cursor = self.conn.cursor()
+        fields = []
+        values = []
+        for key, value in kwargs.items():
+            if key in ('is_read', 'is_handled'):
+                value = 1 if value else 0
+            fields.append(f"{key}=?")
+            values.append(value)
+        values.append(warning_id)
+        cursor.execute(f"UPDATE warning_records SET {', '.join(fields)} WHERE id=?", values)
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_warning(self, warning_id: int) -> Optional[WarningRecord]:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM warning_records WHERE id=?", (warning_id,))
+        row = cursor.fetchone()
+        if row:
+            d = dict(row)
+            d['is_read'] = bool(d['is_read'])
+            d['is_handled'] = bool(d['is_handled'])
+            return WarningRecord(**d)
+        return None
+
+    def get_warnings_by_building(self, building_id: int, is_read: bool = None,
+                                  warning_type: str = None,
+                                  warning_level: str = None) -> List[WarningRecord]:
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM warning_records WHERE building_id=?"
+        params = [building_id]
+        if is_read is not None:
+            query += " AND is_read=?"
+            params.append(1 if is_read else 0)
+        if warning_type:
+            query += " AND warning_type=?"
+            params.append(warning_type)
+        if warning_level:
+            query += " AND warning_level=?"
+            params.append(warning_level)
+        query += " ORDER BY created_at DESC"
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        records = []
+        for row in rows:
+            d = dict(row)
+            d['is_read'] = bool(d['is_read'])
+            d['is_handled'] = bool(d['is_handled'])
+            records.append(WarningRecord(**d))
+        return records
+
+    def get_warnings_by_component(self, component_id: int) -> List[WarningRecord]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM warning_records WHERE component_id=? ORDER BY created_at DESC",
+            (component_id,)
+        )
+        rows = cursor.fetchall()
+        records = []
+        for row in rows:
+            d = dict(row)
+            d['is_read'] = bool(d['is_read'])
+            d['is_handled'] = bool(d['is_handled'])
+            records.append(WarningRecord(**d))
+        return records
+
+    def get_unread_warning_count(self, building_id: int) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) as cnt FROM warning_records WHERE building_id=? AND is_read=0",
+            (building_id,)
+        )
+        row = cursor.fetchone()
+        return row["cnt"] if row else 0
+
+    def mark_warning_read(self, warning_id: int) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE warning_records SET is_read=1 WHERE id=?",
+            (warning_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def mark_warning_handled(self, warning_id: int, handle_remark: str = "") -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE warning_records SET is_handled=1, handle_remark=?, handled_at=? WHERE id=?",
+            (handle_remark, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), warning_id)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    # ==================== 操作日志相关方法 ====================
+
+    def add_operation_log(self, log: OperationLog) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO operation_logs
+               (module, action, target_type, target_id, operator, detail,
+                ip_address, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (log.module, log.action, log.target_type, log.target_id,
+             log.operator, log.detail, log.ip_address, log.created_at)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_operation_logs(self, module: str = None, action: str = None,
+                           target_type: str = None, target_id: int = None,
+                           limit: int = 100, offset: int = 0) -> List[OperationLog]:
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM operation_logs WHERE 1=1"
+        params = []
+        if module:
+            query += " AND module=?"
+            params.append(module)
+        if action:
+            query += " AND action=?"
+            params.append(action)
+        if target_type:
+            query += " AND target_type=?"
+            params.append(target_type)
+        if target_id is not None:
+            query += " AND target_id=?"
+            params.append(target_id)
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [OperationLog(**dict(row)) for row in rows]
+
+    def get_operation_logs_by_target(self, target_type: str, target_id: int,
+                                      limit: int = 50) -> List[OperationLog]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM operation_logs WHERE target_type=? AND target_id=? ORDER BY created_at DESC LIMIT ?",
+            (target_type, target_id, limit)
+        )
+        rows = cursor.fetchall()
+        return [OperationLog(**dict(row)) for row in rows]
+
+    # ==================== 偏差病害联动相关方法 ====================
+
+    def upsert_deviation_disease_link(self, link: DeviationDiseaseLink) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """SELECT id FROM deviation_disease_links WHERE component_id=?""",
+            (link.component_id,)
+        )
+        row = cursor.fetchone()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if row:
+            cursor.execute(
+                """UPDATE deviation_disease_links SET
+                   component_code=?, deviation_level=?, disease_count=?,
+                   risk_level=?, assessment=?, suggestion=?, updated_at=?
+                   WHERE component_id=?""",
+                (link.component_code, link.deviation_level, link.disease_count,
+                 link.risk_level, link.assessment, link.suggestion, now,
+                 link.component_id)
+            )
+            self.conn.commit()
+            return row["id"]
+        else:
+            cursor.execute(
+                """INSERT INTO deviation_disease_links
+                   (component_id, component_code, deviation_level, disease_count,
+                    risk_level, assessment, suggestion, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (link.component_id, link.component_code, link.deviation_level,
+                 link.disease_count, link.risk_level, link.assessment,
+                 link.suggestion, link.created_at, link.updated_at)
+            )
+            self.conn.commit()
+            return cursor.lastrowid
+
+    def get_deviation_disease_link(self, component_id: int) -> Optional[DeviationDiseaseLink]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM deviation_disease_links WHERE component_id=?",
+            (component_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return DeviationDiseaseLink(**dict(row))
+        return None
+
+    def get_high_risk_components(self, building_id: int,
+                                  min_risk_level: str = "high") -> List[DeviationDiseaseLink]:
+        cursor = self.conn.cursor()
+        risk_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+        min_level_val = risk_order.get(min_risk_level, 2)
+        cursor.execute("""
+            SELECT ddl.* FROM deviation_disease_links ddl
+            JOIN components c ON ddl.component_id = c.id
+            WHERE c.building_id=?
+            ORDER BY 
+                CASE ddl.risk_level
+                    WHEN 'critical' THEN 4
+                    WHEN 'high' THEN 3
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 1
+                    ELSE 0
+                END DESC,
+                ddl.disease_count DESC
+        """, (building_id,))
+        rows = cursor.fetchall()
+        links = []
+        for row in rows:
+            d = dict(row)
+            level_val = risk_order.get(d['risk_level'], 0)
+            if level_val >= min_level_val:
+                links.append(DeviationDiseaseLink(**d))
+        return links
+
+    def delete_deviation_disease_link(self, component_id: int) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM deviation_disease_links WHERE component_id=?",
+                       (component_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def update_deviation_disease_stats(self, building_id: int) -> int:
+        cursor = self.conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("""
+            SELECT c.id as component_id, c.code as component_code,
+                   c.deviation_threshold,
+                   COUNT(dr.id) as disease_count
+            FROM components c
+            LEFT JOIN disease_records dr ON c.id = dr.component_id
+            WHERE c.building_id=?
+            GROUP BY c.id
+        """, (building_id,))
+        rows = cursor.fetchall()
+        updated_count = 0
+        for row in rows:
+            component_id = row["component_id"]
+            component_code = row["component_code"]
+            disease_count = row["disease_count"] or 0
+            deviation_threshold = row["deviation_threshold"] or 5.0
+
+            cursor.execute("""
+                SELECT length, width, angle FROM measurement_records
+                WHERE component_id=? ORDER BY version DESC LIMIT 1
+            """, (component_id,))
+            meas_row = cursor.fetchone()
+            deviation_level = "low"
+            if meas_row:
+                component = self.get_component(component_id)
+                if component:
+                    length_dev = abs(meas_row["length"] - component.design_length)
+                    width_dev = abs(meas_row["width"] - component.design_width)
+                    angle_dev = abs(meas_row["angle"] - component.design_angle)
+                    max_dev_rel = max(
+                        length_dev / deviation_threshold if deviation_threshold > 0 else 0,
+                        width_dev / deviation_threshold if deviation_threshold > 0 else 0,
+                        angle_dev / deviation_threshold if deviation_threshold > 0 else 0
+                    )
+                    if max_dev_rel >= 3:
+                        deviation_level = "critical"
+                    elif max_dev_rel >= 2:
+                        deviation_level = "high"
+                    elif max_dev_rel >= 1:
+                        deviation_level = "medium"
+                    else:
+                        deviation_level = "low"
+
+            risk_level = "low"
+            dev_risk = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+            disease_risk = min(disease_count, 3)
+            total_risk = dev_risk.get(deviation_level, 0) + disease_risk
+            if total_risk >= 5:
+                risk_level = "critical"
+            elif total_risk >= 3:
+                risk_level = "high"
+            elif total_risk >= 1:
+                risk_level = "medium"
+
+            assessment = f"偏差等级: {deviation_level}, 病害数量: {disease_count}"
+            suggestion = ""
+            if risk_level in ("high", "critical"):
+                suggestion = "建议及时处理，重点关注"
+            elif risk_level == "medium":
+                suggestion = "建议定期检查，关注变化"
+            else:
+                suggestion = "状态良好，正常维护"
+
+            cursor.execute("""
+                SELECT id FROM deviation_disease_links WHERE component_id=?
+            """, (component_id,))
+            existing = cursor.fetchone()
+            if existing:
+                cursor.execute(
+                    """UPDATE deviation_disease_links SET
+                       component_code=?, deviation_level=?, disease_count=?,
+                       risk_level=?, assessment=?, suggestion=?, updated_at=?
+                       WHERE component_id=?""",
+                    (component_code, deviation_level, disease_count,
+                     risk_level, assessment, suggestion, now, component_id)
+                )
+            else:
+                cursor.execute(
+                    """INSERT INTO deviation_disease_links
+                       (component_id, component_code, deviation_level, disease_count,
+                        risk_level, assessment, suggestion, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (component_id, component_code, deviation_level, disease_count,
+                     risk_level, assessment, suggestion, now, now)
+                )
+            updated_count += 1
+        self.conn.commit()
+        return updated_count

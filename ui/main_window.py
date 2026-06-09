@@ -677,18 +677,23 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
+        self.history_tabs = QTabWidget()
+
+        batch_tab = QWidget()
+        batch_layout = QVBoxLayout(batch_tab)
+
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("导入批次历史："))
         btn_refresh_batches = QPushButton("刷新")
         btn_refresh_batches.clicked.connect(self._refresh_import_batches)
         top_bar.addStretch()
         top_bar.addWidget(btn_refresh_batches)
-        layout.addLayout(top_bar)
+        batch_layout.addLayout(top_bar)
 
         splitter = QSplitter(Qt.Vertical)
 
         batch_group = QGroupBox("导入批次")
-        batch_layout = QVBoxLayout(batch_group)
+        batch_group_layout = QVBoxLayout(batch_group)
         self.batch_table = QTableWidget()
         self.batch_table.setColumnCount(7)
         self.batch_table.setHorizontalHeaderLabels(
@@ -698,7 +703,7 @@ class MainWindow(QMainWindow):
         self.batch_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.batch_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.batch_table.itemSelectionChanged.connect(self._on_batch_selected)
-        batch_layout.addWidget(self.batch_table)
+        batch_group_layout.addWidget(self.batch_table)
         splitter.addWidget(batch_group)
 
         batch_error_group = QGroupBox("批次错误详情")
@@ -714,14 +719,58 @@ class MainWindow(QMainWindow):
         splitter.addWidget(batch_error_group)
 
         splitter.setSizes([200, 200])
-        layout.addWidget(splitter, 1)
+        batch_layout.addWidget(splitter, 1)
 
         bottom_bar = QHBoxLayout()
         btn_rollback = QPushButton("回滚此批次")
         btn_rollback.clicked.connect(self._rollback_batch)
         bottom_bar.addStretch()
         bottom_bar.addWidget(btn_rollback)
-        layout.addLayout(bottom_bar)
+        batch_layout.addLayout(bottom_bar)
+
+        self.history_tabs.addTab(batch_tab, "导入批次")
+
+        log_tab = QWidget()
+        log_layout = QVBoxLayout(log_tab)
+
+        log_filter_bar = QHBoxLayout()
+        log_filter_bar.addWidget(QLabel("模块："))
+        self.log_module_combo = QComboBox()
+        self.log_module_combo.addItem("全部", None)
+        from database import MODULES
+        for code, name in MODULES:
+            self.log_module_combo.addItem(name, code)
+        self.log_module_combo.currentIndexChanged.connect(self._refresh_operation_logs)
+        log_filter_bar.addWidget(self.log_module_combo)
+
+        log_filter_bar.addWidget(QLabel("操作："))
+        self.log_action_combo = QComboBox()
+        self.log_action_combo.addItem("全部", None)
+        from database import ACTIONS
+        for code, name in ACTIONS:
+            self.log_action_combo.addItem(name, code)
+        self.log_action_combo.currentIndexChanged.connect(self._refresh_operation_logs)
+        log_filter_bar.addWidget(self.log_action_combo)
+
+        btn_refresh_logs = QPushButton("刷新日志")
+        btn_refresh_logs.clicked.connect(self._refresh_operation_logs)
+        log_filter_bar.addStretch()
+        log_filter_bar.addWidget(btn_refresh_logs)
+        log_layout.addLayout(log_filter_bar)
+
+        self.operation_log_table = QTableWidget()
+        self.operation_log_table.setColumnCount(7)
+        self.operation_log_table.setHorizontalHeaderLabels(
+            ["ID", "模块", "操作", "操作人", "关联ID", "操作时间", "详情"]
+        )
+        self.operation_log_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.operation_log_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.operation_log_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        log_layout.addWidget(self.operation_log_table, 1)
+
+        self.history_tabs.addTab(log_tab, "操作日志")
+
+        layout.addWidget(self.history_tabs, 1)
 
         self.tabs.addTab(tab, "📜 历史追溯")
 
@@ -784,6 +833,7 @@ class MainWindow(QMainWindow):
         self._refresh_recheck_table()
         self._refresh_disease_data()
         self._refresh_import_batches()
+        self._refresh_operation_logs()
 
     def _clear_all_data(self):
         self.component_table.setRowCount(0)
@@ -816,6 +866,8 @@ class MainWindow(QMainWindow):
             self.disease_widget.set_building(None)
         if hasattr(self, 'disease_dashboard') and self.disease_dashboard:
             self.disease_dashboard.set_building(None)
+        if hasattr(self, 'operation_log_table') and self.operation_log_table:
+            self.operation_log_table.setRowCount(0)
 
     def _refresh_disease_data(self):
         if not self.current_building_id:
@@ -1731,6 +1783,46 @@ class MainWindow(QMainWindow):
 
             item = self.batch_table.item(row, 0)
             item.setData(Qt.UserRole, batch.id)
+
+    def _refresh_operation_logs(self):
+        if not self.current_building_id:
+            self.operation_log_table.setRowCount(0)
+            return
+
+        module_filter = self.log_module_combo.currentData()
+        action_filter = self.log_action_combo.currentData()
+
+        logs = self.db.get_operation_logs(
+            building_id=self.current_building_id,
+            module=module_filter,
+            action_type=action_filter,
+            limit=200,
+        )
+
+        from database import MODULES, ACTIONS
+        module_map = {code: name for code, name in MODULES}
+        action_map = {code: name for code, name in ACTIONS}
+
+        self.operation_log_table.setRowCount(len(logs))
+        for row, log in enumerate(logs):
+            related_id = "-"
+            if log.record_id:
+                related_id = str(log.record_id)
+
+            items = [
+                QTableWidgetItem(str(log.id)),
+                QTableWidgetItem(module_map.get(log.module, log.module)),
+                QTableWidgetItem(action_map.get(log.action_type, log.action_type)),
+                QTableWidgetItem(log.operator or "-"),
+                QTableWidgetItem(related_id),
+                QTableWidgetItem(log.created_at),
+                QTableWidgetItem(log.details or "-"),
+            ]
+
+            for col, item in enumerate(items):
+                self.operation_log_table.setItem(row, col, item)
+
+            self.operation_log_table.item(row, 0).setData(Qt.UserRole, log.id)
 
     def _on_batch_selected(self):
         items = self.batch_table.selectedItems()
