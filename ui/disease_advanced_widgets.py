@@ -171,6 +171,13 @@ class WorkflowStepWidget(QWidget):
         self.current_status = current_status
         self._init_ui()
 
+    def _get_step_status(self, step):
+        if isinstance(step, dict):
+            return step.get("status")
+        if isinstance(step, (list, tuple)) and len(step) > 0:
+            return step[0]
+        return step
+
     def _init_ui(self):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -179,7 +186,7 @@ class WorkflowStepWidget(QWidget):
         status_map = {code: name for code, name in DISEASE_STATUSES}
 
         for i, step in enumerate(self.steps):
-            status_code = step["status"]
+            status_code = self._get_step_status(step)
             status_name = status_map.get(status_code, status_code)
             is_completed = self._is_step_completed(status_code)
             is_current = status_code == self.current_status
@@ -194,7 +201,7 @@ class WorkflowStepWidget(QWidget):
         if not self.current_status:
             return False
 
-        step_order = [s["status"] for s in self.steps]
+        step_order = [self._get_step_status(s) for s in self.steps]
         try:
             current_idx = step_order.index(self.current_status)
             step_idx = step_order.index(status_code)
