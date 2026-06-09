@@ -12,7 +12,10 @@ import shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database import DatabaseManager, Building, Component, MortiseTenon, MeasurementRecord
-from utils.validators import validate_csv_row, validate_component_code, validate_positive_number, validate_angle
+from utils.validators import (
+    validate_csv_row, validate_component_code, validate_positive_number,
+    validate_angle, validate_measure_time
+)
 from services import CsvImporter, DeviationCalculator, ReportGenerator
 
 
@@ -40,6 +43,33 @@ def test_validators():
     assert validate_angle(181) == False
     assert validate_angle("abc") == False
     print("  ✓ 角度校验")
+
+    valid, normalized = validate_measure_time("2024-01-15 09:30:00")
+    assert valid == True
+    assert normalized == "2024-01-15 09:30:00"
+    print("  ✓ 时间格式-标准格式")
+
+    valid, normalized = validate_measure_time("2024-01-15")
+    assert valid == True
+    assert normalized == "2024-01-15 00:00:00"
+    print("  ✓ 时间格式-仅日期")
+
+    valid, normalized = validate_measure_time("2024/01/15 10:30")
+    assert valid == True
+    assert "2024-01-15" in normalized
+    print("  ✓ 时间格式-斜杠日期")
+
+    valid, _ = validate_measure_time("20240115")
+    assert valid == True
+    print("  ✓ 时间格式-紧凑日期")
+
+    valid, _ = validate_measure_time("随便写点啥")
+    assert valid == False
+    print("  ✓ 时间格式-无效文本拒绝")
+
+    valid, _ = validate_measure_time("")
+    assert valid == False
+    print("  ✓ 时间格式-空值拒绝")
 
     test_row = {
         "构件编号": "L-001",
@@ -218,7 +248,99 @@ def test_csv_import():
         else:
             print("  ⚠  跳过CSV测试（未找到示例文件）")
 
+        bad_csv = os.path.join(tmp_dir, "bad_data.csv")
+        with open(bad_csv, 'w', encoding='utf-8') as f:
+            f.write("构件编号,长度,宽度,角度,测量时间\n")
+            f.write("L-001,2500,300,90,2024-01-15 10:00:00\n")
+            f.write("L-002,abc,300,90,2024-01-15 10:00:00\n")
+            f.write("L-003,-5,300,90,2024-01-15 10:00:00\n")
+            f.write("Z-001,200,300,200,2024-01-15 10:00:00\n")
+            f.write("Z-002,200,300,90,这不是时间\n")
+            f.write(",200,300,90,2024-01-15\n")
+
+        result3 = importer.import_file(bad_csv, bid1)
+        assert result3.error_count >= 4
+        print(f"  ✓ 错误数据拒绝导入（失败{result3.error_count}条）")
+
+        headers, rows, errors, row_errors = importer.preview_file(bad_csv, max_rows=10)
+        assert len(row_errors) >= 4
+        print(f"  ✓ 预览时检测出错误行（共{len(row_errors)}行有问题）")
+        assert len(errors) >= 4
+        print(f"  ✓ 预览时返回错误详情（共{len(errors)}个错误）")
+
         print("  CSV导入测试通过！\n")
+
+    finally:
+        db.close()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_auto_recheck():
+    print("=" * 50)
+    print("测试6：自动标记复测功能")
+    print("=" * 50)
+
+    tmp_dir = tempfile.mkdtemp()
+    db_path = os.path.join(tmp_dir, "test.db")
+    db = DatabaseManager(db_path)
+
+    try:
+        b1 = Building(id=None, name="测试建筑", code="TEST-001")
+        bid1 = db.add_building(b1)
+
+        c_normal = Component(id=None, building_id=bid1, code="N-001", name="正常构件",
+                           component_type="梁", design_length=2500.0, design_width=300.0,
+                           design_angle=90.0, deviation_threshold=5.0)
+        db.add_component(c_normal)
+
+        c_abnormal = Component(id=None, building_id=bid1, code="A-001", name="异常构件",
+                             component_type="梁", design_length=2500.0, design_width=300.0,
+                             design_angle=90.0, deviation_threshold=5.0)
+        db.add_component(c_abnormal)
+
+        test_csv = os.path.join(tmp_dir, "test_recheck.csv")
+        with open(test_csv, 'w', encoding='utf-8') as f:
+            f.write("构件编号,长度,宽度,角度,测量时间\n")
+            f.write("N-001,2502.0,301.0,90.0,2024-01-15 10:00:00\n")
+            f.write("A-001,2510.0,290.0,88.0,2024-01-15 10:00:00\n")
+
+        importer = CsvImporter(db)
+
+        result = importer.import_file(test_csv, bid1, auto_mark_recheck=True)
+        assert result.success_count == 2
+        assert result.auto_recheck_count == 1
+        print(f"  ✓ 自动标记复测计数正确（{result.auto_recheck_count}条）")
+
+        abnormal_comp = db.get_component_by_code(bid1, "A-001")
+        latest = db.get_latest_measurement(abnormal_comp.id)
+        assert latest is not None
+        assert latest.is_recheck == True
+        assert "偏差超过阈值" in latest.remark
+        print("  ✓ 异常构件自动标记为需复测")
+
+        normal_comp = db.get_component_by_code(bid1, "N-001")
+        latest_n = db.get_latest_measurement(normal_comp.id)
+        assert latest_n is not None
+        assert latest_n.is_recheck == False
+        print("  ✓ 正常构件不标记复测")
+
+        test_csv2 = os.path.join(tmp_dir, "test_recheck_off.csv")
+        with open(test_csv2, 'w', encoding='utf-8') as f:
+            f.write("构件编号,长度,宽度,角度,测量时间\n")
+            f.write("A-001,2515.0,285.0,87.0,2024-01-16 10:00:00\n")
+
+        result2 = importer.import_file(test_csv2, bid1, auto_mark_recheck=False)
+        assert result2.success_count == 1
+        assert result2.auto_recheck_count == 0
+        latest2 = db.get_latest_measurement(abnormal_comp.id)
+        assert latest2.is_recheck == False
+        print("  ✓ 关闭自动标记时不标记复测")
+
+        recheck_list = db.get_recheck_records(bid1)
+        assert len(recheck_list) == 1
+        print("  ✓ 复测列表查询正确")
+
+        print("  自动标记复测测试通过！\n")
 
     finally:
         db.close()
@@ -364,6 +486,7 @@ def main():
         test_csv_import()
         test_deviation()
         test_report()
+        test_auto_recheck()
 
         print("=" * 60)
         print("🎉 所有测试全部通过！")

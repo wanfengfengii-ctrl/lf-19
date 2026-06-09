@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QInputDialog, QFileDialog, QComboBox,
     QSplitter, QGroupBox, QFormLayout, QTextEdit, QDoubleSpinBox,
-    QListWidget, QListWidgetItem, QAbstractItemView, QDialog, QDialogButtonBox
+    QListWidget, QListWidgetItem, QAbstractItemView, QDialog, QDialogButtonBox,
+    QCheckBox
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QBrush, QColor
@@ -317,9 +318,12 @@ class MainWindow(QMainWindow):
         btn_preview.clicked.connect(self._preview_csv)
         btn_import = QPushButton("导入数据")
         btn_import.clicked.connect(self._import_csv)
+        self.auto_recheck_checkbox = QCheckBox("自动标记异常需复测")
+        self.auto_recheck_checkbox.setChecked(True)
         row2.addWidget(btn_preview)
         row2.addWidget(btn_import)
         row2.addStretch()
+        row2.addWidget(self.auto_recheck_checkbox)
         file_layout.addLayout(row2)
 
         layout.addWidget(file_group)
@@ -743,21 +747,28 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "文件不存在")
             return
 
-        headers, rows, errors = self.csv_importer.preview_file(file_path, max_rows=20)
+        headers, rows, errors, row_errors = self.csv_importer.preview_file(file_path, max_rows=20)
 
         if headers:
             self.preview_table.setColumnCount(len(headers))
             self.preview_table.setHorizontalHeaderLabels(headers)
             self.preview_table.setRowCount(len(rows))
             for row_idx, row_data in enumerate(rows):
+                row_num = row_idx + 2
+                has_error = row_num in row_errors
                 for col_idx, header in enumerate(headers):
-                    self.preview_table.setItem(
-                        row_idx, col_idx,
-                        QTableWidgetItem(str(row_data.get(header, "")))
-                    )
+                    item = QTableWidgetItem(str(row_data.get(header, "")))
+                    if has_error:
+                        item.setBackground(QBrush(QColor(255, 230, 230)))
+                        item.setForeground(QBrush(QColor(180, 0, 0)))
+                    self.preview_table.setItem(row_idx, col_idx, item)
             self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-        error_msg = "\n".join(errors) if errors else "预览成功，格式正确"
+        if errors:
+            error_msg = "\n".join(errors)
+            error_msg = f"共发现 {len(errors)} 个问题（仅显示预览范围内）：\n\n" + error_msg
+        else:
+            error_msg = "预览成功，数据格式正确"
         self.error_text.setText(error_msg)
 
     def _import_csv(self):
@@ -769,19 +780,34 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先选择CSV文件")
             return
 
-        reply = QMessageBox.question(self, "确认导入",
-                                     "确定要导入数据吗？\n重复测量数据将保留历史版本。",
+        auto_recheck = self.auto_recheck_checkbox.isChecked()
+
+        confirm_text = "确定要导入数据吗？\n重复测量数据将保留历史版本。"
+        if auto_recheck:
+            confirm_text += "\n\n✓ 已开启：偏差超过阈值将自动标记为需复测"
+        else:
+            confirm_text += "\n\n⚠  未开启自动标记复测，导入后需手动标记"
+
+        reply = QMessageBox.question(self, "确认导入", confirm_text,
                                      QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
 
         try:
-            result = self.csv_importer.import_file(file_path, self.current_building_id)
+            result = self.csv_importer.import_file(
+                file_path, self.current_building_id,
+                auto_mark_recheck=auto_recheck
+            )
 
-            msg = f"导入完成！\n成功：{result.success_count} 条\n失败：{result.error_count} 条"
+            msg = (f"导入完成！\n"
+                   f"成功：{result.success_count} 条\n"
+                   f"失败：{result.error_count} 条")
+            if auto_recheck and result.auto_recheck_count > 0:
+                msg += f"\n\n🔴 自动标记需复测：{result.auto_recheck_count} 条"
+
             if result.errors:
                 self.error_text.setText("\n".join(result.errors))
-                msg += "\n详细错误请查看下方列表"
+                msg += "\n\n详细错误请查看下方列表"
 
             QMessageBox.information(self, "导入结果", msg)
 
@@ -789,9 +815,11 @@ class MainWindow(QMainWindow):
             self._refresh_component_table()
             if self.current_component_id:
                 self._refresh_history_table()
-            self.statusBar().showMessage(
-                f"导入完成：成功{result.success_count}条，失败{result.error_count}条", 5000
-            )
+
+            status_msg = f"导入完成：成功{result.success_count}条，失败{result.error_count}条"
+            if auto_recheck and result.auto_recheck_count > 0:
+                status_msg += f"，自动标记复测{result.auto_recheck_count}条"
+            self.statusBar().showMessage(status_msg, 6000)
 
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入失败：{str(e)}")

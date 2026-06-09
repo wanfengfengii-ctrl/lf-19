@@ -1,9 +1,38 @@
 import re
 from typing import Dict, List, Tuple
+from datetime import datetime
 
 
 class ValidationError(Exception):
     pass
+
+
+TIME_FORMATS = [
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+    "%Y%m%d%H%M%S",
+    "%Y%m%d",
+]
+
+
+def validate_measure_time(time_str: str) -> Tuple[bool, str]:
+    if not time_str or not isinstance(time_str, str):
+        return False, ""
+    time_str = time_str.strip()
+    if not time_str:
+        return False, ""
+
+    for fmt in TIME_FORMATS:
+        try:
+            parsed = datetime.strptime(time_str, fmt)
+            return True, parsed.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    return False, ""
 
 
 def validate_component_code(code: str) -> bool:
@@ -75,7 +104,13 @@ def validate_csv_row(row_data: Dict, row_index: int) -> Tuple[bool, List[str], D
     measure_time = str(row_data.get("测量时间", "")).strip()
     if not measure_time:
         errors.append(f"第{row_index}行：测量时间不能为空")
-    cleaned["measure_time"] = measure_time
+    else:
+        time_valid, normalized_time = validate_measure_time(measure_time)
+        if not time_valid:
+            errors.append(f"第{row_index}行：测量时间格式无效，当前值为{measure_time}")
+            cleaned["measure_time"] = measure_time
+        else:
+            cleaned["measure_time"] = normalized_time
 
     is_valid = len(errors) == 0
     return is_valid, errors, cleaned
